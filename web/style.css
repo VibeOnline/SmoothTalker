@@ -93,6 +93,7 @@ body {
 #toggle-sidebar {
   background: none; border: none; color: var(--muted); cursor: pointer;
   font-size: 20px; padding: 4px 8px; border-radius: 6px;
+  position: relative; z-index: 20;
 }
 #toggle-sidebar:hover { background: rgba(127, 127, 127, 0.15); }
 #chat-title { color: var(--muted); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -195,4 +196,5 @@ details.think .tbody { white-space: pre-wrap; margin-top: 6px; font-size: 13.5px
 @media (max-width: 760px) {
   #sidebar { position: fixed; z-index: 10; height: 100%; }
   #sidebar.hidden { margin-left: -272px; }
+  .brand { padding-top: 52px; }
 }
