@@ -17,7 +17,7 @@ import (
 
 const (
 	target        = "http://127.0.0.1:11434"
-	listenAddr    = ":8080"
+	listenAddr    = ":1337"
 	routerModel   = "nimble:9b"
 	fallbackModel = "gemma4:e2b-mlx"
 	maxBodyBytes  = 10 << 20 // 10 MiB
@@ -58,7 +58,7 @@ func main() {
 			return
 		}
 
-		if r.Method == http.MethodPost && (r.URL.Path == "/api/chat" || r.URL.Path == "/api/generate") {
+		if r.Method == http.MethodPost && (r.URL.Path == "/api/chat" || r.URL.Path == "/api/generate" || r.URL.Path == "/v1/chat/completions") {
 			if !rewriteRequest(w, r) {
 				return // error already written
 			}
