@@ -12,24 +12,38 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
 const (
 	target        = "http://127.0.0.1:11434"
 	listenAddr    = ":1337"
-	routerModel   = "nimble:9b"
+	routerModel   = "tev1:0.8b"
 	fallbackModel = "gemma4:e2b-mlx"
 	maxBodyBytes  = 10 << 20 // 10 MiB
 )
 
 // Used only for the proxy's own side calls (tags + router), not for proxied traffic.
-var client = &http.Client{Timeout: 30 * time.Second}
+var client = &http.Client{Timeout: 60 * time.Second}
+
+type ollamaModelDetails struct {
+	ParameterSize     string `json:"parameter_size"`
+	QuantizationLevel string `json:"quantization_level"`
+	Runner            string `json:"runner"`
+	ContextLength     int    `json:"context_length"`
+}
+
+type ollamaModel struct {
+	Name         string             `json:"name"`
+	RemoteModel  string             `json:"remote_model"`
+	RemoteHost   string             `json:"remote_host"`
+	Capabilities []string           `json:"capabilities"`
+	Details      ollamaModelDetails `json:"details"`
+}
 
 type ollamaModelList struct {
-	Models []struct {
-		Name string `json:"name"`
-	} `json:"models"`
+	Models []ollamaModel `json:"models"`
 }
 
 type routerAnswer struct {
@@ -132,9 +146,9 @@ func chooseModel(ctx context.Context, req map[string]any, path string) string {
 
 	// Exclude the router itself from the candidates.
 	candidates := make(map[string]string)
-	for _, name := range models {
-		if name != routerModel {
-			candidates[name] = fmt.Sprintf("Use the %s model", name)
+	for _, m := range models {
+		if m.Name != routerModel {
+			candidates[m.Name] = describeModel(m)
 		}
 	}
 	if len(candidates) == 0 {
@@ -142,7 +156,16 @@ func chooseModel(ctx context.Context, req map[string]any, path string) string {
 		return fallbackModel
 	}
 
-	choice, err := askRouter(ctx, extractInput(req, path), candidates)
+	state := extractInput(req, path)
+	if hint := requestHints(req); hint != "" {
+		if state == "Empty request" {
+			state = hint
+		} else {
+			state += "\n\n" + hint
+		}
+	}
+
+	choice, err := askRouter(ctx, state, candidates)
 	if err != nil {
 		log.Printf("Router failed: %v. Falling back to %s.", err, fallbackModel)
 		return fallbackModel
@@ -156,7 +179,7 @@ func chooseModel(ctx context.Context, req map[string]any, path string) string {
 	return choice
 }
 
-func fetchModels(ctx context.Context) ([]string, error) {
+func fetchModels(ctx context.Context) ([]ollamaModel, error) {
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, target+"/api/tags", nil)
 	if err != nil {
 		return nil, err
@@ -176,9 +199,9 @@ func fetchModels(ctx context.Context) ([]string, error) {
 		return nil, fmt.Errorf("decoding /api/tags: %w", err)
 	}
 
-	names := make([]string, 0, len(list.Models))
+	names := make([]ollamaModel, 0, len(list.Models))
 	for _, m := range list.Models {
-		names = append(names, m.Name)
+		names = append(names, m)
 	}
 	return names, nil
 }
@@ -189,9 +212,13 @@ func askRouter(ctx context.Context, input string, candidates map[string]string) 
 		"state": input,
 		"questions": map[string]any{
 			"best_model": map[string]any{
-				"type":         "choice",
-				"instructions": "Which model is best for this request? Provide only the model name.",
-				"criteria":     candidates,
+				"type": "choice",
+				"instructions": "Pick the most efficient, lowest-cost model that can still complete this request well. " +
+					"Local models run free and fastest on-device; cloud models cost money per token and are slower but stronger. " +
+					"Choose the cheapest model whose capabilities cover the request (e.g. image attachments require vision support, " +
+					"tool definitions require tools support). Only escalate to a bigger or cloud model when the task is genuinely " +
+					"too complex for the smaller local ones.",
+				"criteria": candidates,
 			},
 		},
 	}
@@ -238,20 +265,117 @@ func askRouter(ctx context.Context, input string, candidates map[string]string) 
 	return ans.Choice, nil
 }
 
-// extractInput pulls the latest user text without producing "<nil>".
-func extractInput(req map[string]any, path string) string {
-	var s string
-	if path == "/api/chat" {
-		if msgs, ok := req["messages"].([]any); ok && len(msgs) > 0 {
-			if m, ok := msgs[len(msgs)-1].(map[string]any); ok {
-				s, _ = m["content"].(string)
+// describeModel renders /api/tags metadata into a short, router-facing blurb
+// covering cost, speed, size, and capabilities so the router can weigh
+// efficiency against capability for each candidate.
+func describeModel(m ollamaModel) string {
+	var b strings.Builder
+	if m.RemoteHost != "" {
+		host := m.RemoteHost
+		if u, err := url.Parse(host); err == nil && u.Host != "" {
+			host = u.Host
+		}
+		name := m.RemoteModel
+		if name == "" {
+			name = m.Name
+		}
+		fmt.Fprintf(&b, "Cloud model %s at %s — paid per token, slower and costlier than local", name, host)
+	} else {
+		b.WriteString("Local model — free and fastest, runs on-device")
+	}
+	if m.Details.Runner != "" {
+		fmt.Fprintf(&b, " (%s)", m.Details.Runner)
+	}
+	if m.Details.ParameterSize != "" {
+		fmt.Fprintf(&b, "; %s parameters", m.Details.ParameterSize)
+	}
+	if m.Details.QuantizationLevel != "" {
+		fmt.Fprintf(&b, "; %s quantization", m.Details.QuantizationLevel)
+	}
+	if m.Details.ContextLength > 0 {
+		fmt.Fprintf(&b, "; %s context window", humanContext(m.Details.ContextLength))
+	}
+	if len(m.Capabilities) > 0 {
+		fmt.Fprintf(&b, "; supports %s", strings.Join(m.Capabilities, ", "))
+	}
+	return b.String()
+}
+
+// humanContext shortens a context-window size: 262144 -> "262k", 1048576 -> "1M".
+func humanContext(n int) string {
+	switch {
+	case n >= 1_000_000 && n%1_000_000 == 0:
+		return fmt.Sprintf("%dM", n/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%dk", n/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
+// requestHints flags request features the router must account for, since a
+// model without the matching capability cannot serve the request at all.
+func requestHints(req map[string]any) string {
+	var hints []string
+
+	hasImages := false
+	if msgs, ok := req["messages"].([]any); ok {
+		for _, mm := range msgs {
+			if m, ok := mm.(map[string]any); ok {
+				if imgs, ok := m["images"].([]any); ok && len(imgs) > 0 {
+					hasImages = true
+				}
 			}
 		}
-	} else {
-		s, _ = req["prompt"].(string)
 	}
-	if s == "" {
+	if !hasImages {
+		if imgs, ok := req["images"].([]any); ok && len(imgs) > 0 {
+			hasImages = true
+		}
+	}
+	if hasImages {
+		hints = append(hints, "The request contains image attachments, so the chosen model must support vision.")
+	}
+
+	if tools, ok := req["tools"].([]any); ok && len(tools) > 0 {
+		hints = append(hints, "The request includes tool definitions, so the chosen model must support tool calling.")
+	}
+
+	return strings.Join(hints, "\n")
+}
+
+// extractInput pulls the system prompt (if any) and the latest user text so
+// the router sees request context, without producing "<nil>".
+func extractInput(req map[string]any, path string) string {
+	var parts []string
+	if path == "/api/chat" || path == "/v1/chat/completions" {
+		if msgs, ok := req["messages"].([]any); ok {
+			var lastUser string
+			for _, mm := range msgs {
+				m, ok := mm.(map[string]any)
+				if !ok {
+					continue
+				}
+				role, _ := m["role"].(string)
+				content, _ := m["content"].(string)
+				switch role {
+				case "system":
+					if content != "" {
+						parts = append(parts, "System: "+content)
+					}
+				case "user":
+					lastUser = content
+				}
+			}
+			if lastUser != "" {
+				parts = append(parts, "User: "+lastUser)
+			}
+		}
+	} else if prompt, _ := req["prompt"].(string); prompt != "" {
+		parts = append(parts, "User: "+prompt)
+	}
+	if len(parts) == 0 {
 		return "Empty request"
 	}
-	return s
+	return strings.Join(parts, "\n\n")
 }
