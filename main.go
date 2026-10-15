@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	_ "embed"
 )
 
 const (
@@ -25,6 +27,9 @@ const (
 
 // Used only for the proxy's own side calls (tags + router), not for proxied traffic.
 var client = &http.Client{Timeout: 60 * time.Second}
+
+//go:embed RouterSystemPrompt.md
+var routerSystemPrompt string
 
 type ollamaModelDetails struct {
 	ParameterSize     string `json:"parameter_size"`
@@ -238,13 +243,9 @@ func askRouter(ctx context.Context, input string, candidates map[string]string, 
 		"state": input,
 		"questions": map[string]any{
 			"best_model": map[string]any{
-				"type": "choice",
-				"instructions": "Pick the most efficient, lowest-cost model that can still complete this request well. " +
-					"Local models run free and fastest on-device; cloud models cost money per token and are slower but stronger. " +
-					"Choose the cheapest model whose capabilities cover the request (e.g. image attachments require vision support, " +
-					"tool definitions require tools support). Only escalate to a bigger or cloud model when the task is genuinely " +
-					"too complex for the smaller local ones.",
-				"criteria": candidates,
+				"type":         "choice",
+				"instructions": routerSystemPrompt,
+				"criteria":     candidates,
 			},
 		},
 	}
