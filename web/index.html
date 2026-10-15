@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chat</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<aside id="sidebar">
+  <div class="brand serif"><span class="star">✳</span> Chat</div>
+  <button id="new-chat">＋ New chat</button>
+  <div class="section-label">Recents</div>
+  <div id="convo-list"></div>
+  <div id="status">Loading models…</div>
+</aside>
+
+<section id="main">
+  <div id="topbar">
+    <button id="toggle-sidebar" title="Toggle sidebar">☰</button>
+    <div id="chat-title"></div>
+  </div>
+
+  <div id="scroll">
+    <div id="welcome">
+      <div class="star">✳</div>
+      <h1 class="serif">How can I help you today?</h1>
+      <p>Pick a model below, or leave it on “recommended” and let the router decide.</p>
+    </div>
+    <div id="messages"></div>
+  </div>
+
+  <div id="composer-wrap">
+    <div id="composer">
+      <textarea id="input" rows="1" placeholder="Message…" autofocus></textarea>
+      <div class="composer-row">
+        <select id="model" title="Model"></select>
+        <button id="send" title="Send (Enter)" disabled>↑</button>
+      </div>
+    </div>
+    <div class="hint">Enter to send · Shift+Enter for a new line</div>
+  </div>
+</section>
+
+<script src="/app.js"></script>
+</body>
+</html>

@@ -71,6 +71,10 @@ func main() {
 	proxy := httputil.NewSingleHostReverseProxy(remote)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if handleWeb(w, r) {
+			return
+		}
+
 		if r.URL.Path == "/health" {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte("OK"))
