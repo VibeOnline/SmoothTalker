@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -383,12 +384,10 @@ func extractInput(req map[string]any, path string, router *ollamaModel) string {
 				}
 				role, _ := m["role"].(string)
 				content, _ := m["content"].(string)
-				switch role {
-				case "system":
-					if content != "" {
-						parts = append(parts, "System: "+content)
-					}
-				case "user":
+
+				// Only extract user content to avoid leaking tool calls,
+				// system prompts, or assistant history into the router's state.
+				if role == "user" && content != "" {
 					lastUser = content
 				}
 			}
@@ -405,9 +404,37 @@ func extractInput(req map[string]any, path string, router *ollamaModel) string {
 		return "Empty request"
 	}
 
+	// Strip harness markers: Remove everything between <tag...>...</tag>
+	// and specifically remove blocks like <tools>, <rules>, <docs>, <skills>, etc.
+	tagsToStrip := []string{"tools", "rules", "docs", "skills", "cwd", "acp", "available_skills"}
+	for _, tag := range tagsToStrip {
+		// Regex to match <tag ...>content</tag> case-insensitively and across lines.
+		re := regexp.MustCompile("(?is)<" + tag + `[^>]*>.*?</` + tag + `>`)
+		res = re.ReplaceAllString(res, "")
+	}
+
+	// Also strip the ACP tags and metadata
+	res = strings.ReplaceAll(res, "--- pi-extension-context:start ---", "")
+	res = strings.ReplaceAll(res, "--- pi-extension-context:end ---", "")
+	res = strings.ReplaceAll(res, "<file-context>", "")
+	res = strings.ReplaceAll(res, "</file-context>", "")
+	res = strings.ReplaceAll(res, "User: ", "")
+
+	// Strip automated context blocks (typically denoted by [ ... automated context ... ])
+	// and any trailing extension/tooling information.
+	reAutomated := regexp.MustCompile(`(?is)\[.*?automated context.*?\]`)
+	res = reAutomated.ReplaceAllString(res, "")
+
+	// Remove common harness markers and tool lists that often follow automated context
+	res = strings.ReplaceAll(res, "📌 pi-lens active", "")
+	res = strings.ReplaceAll(res, "Key tools (see each tool's own description for args):", "")
+
+	res = strings.TrimSpace(res)
+	if res == "" {
+		return "Empty request"
+	}
+
 	// Truncate to avoid exceeding router's context limit.
-	// We use the router's actual context length if available, otherwise fallback to 2048 tokens.
-	// Subtract some buffer (e.g., 256 tokens) for the instructions and candidates.
 	maxTokens := 2048
 	if router != nil && router.Details.ContextLength > 0 {
 		maxTokens = router.Details.ContextLength
@@ -418,9 +445,9 @@ func extractInput(req map[string]any, path string, router *ollamaModel) string {
 		effectiveMaxTokens = 1
 	}
 
-	// Rough heuristic: 1 token approx 3 chars. Using 3 to be safer.
 	maxChars := effectiveMaxTokens * 3
 
+	fmt.Println(res)
 	if len(res) > maxChars {
 		truncatedText := "... [truncated]"
 		return res[:maxChars-len(truncatedText)] + truncatedText
