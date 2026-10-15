@@ -271,8 +271,6 @@ func askRouter(ctx context.Context, input string, candidates map[string]string, 
 		return "", fmt.Errorf("reading router response: %w", err)
 	}
 
-	log.Printf("Router raw response (status %d): %s", resp.StatusCode, body)
-
 	var result routerResponse
 	if err := json.Unmarshal(body, &result); err != nil {
 		return "", fmt.Errorf("decoding router response (status %d): %w", resp.StatusCode, err)
