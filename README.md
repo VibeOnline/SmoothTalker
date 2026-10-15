@@ -2,6 +2,9 @@
 
 SmoothTalker is an intelligent LLM proxy designed to sit in front of an Ollama instance. Its primary purpose is to automatically route requests to the most appropriate model based on the content of the user's prompt, optimizing for a balance between capability (Cloud/Large models) and efficiency (Local/Small models).
 
+## See it in Action
+![KindaClaude SmoothTalker Demo](examples/KindaClaudeSmoothTalker.gif)
+
 ## Features
 
 - **Dynamic Model Routing**: When a request specifies `model: "recommended"`, SmoothTalker analyzes the prompt to determine if it requires high-reasoning capabilities (e.g., coding, architecture, debugging) or can be handled by a lightweight local model (e.g., greetings, simple facts).
