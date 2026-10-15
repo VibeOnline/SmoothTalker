@@ -24,6 +24,10 @@
     --shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
   }
 }
+/* Theme color for dark mode PWA is handled via manifest or meta, 
+   but for the window decoration to match the sidebar in dark mode, 
+   we'd need a dynamic manifest or JS update. 
+   For now, I'll ensure the light mode decoration matches the sidebar variable. */
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body {
