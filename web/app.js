@@ -331,6 +331,17 @@
     sendBtn.title = "Stop";
     sendBtn.disabled = false;
 
+    var reader = null;
+    var raf = 0;
+    var finished = false;
+    var gotDone = false;
+    var paint = function () {
+      if (finished) return;
+      raf = 0;
+      updateAssistant(el, asst, true);
+      scrollBottom();
+    };
+
     try {
       var resp = await fetch("/api/chat", {
         method: "POST",
@@ -343,15 +354,9 @@
         throw new Error("HTTP " + resp.status + ": " + errText.slice(0, 300));
       }
 
-      var reader = resp.body.getReader();
+      reader = resp.body.getReader();
       var dec = new TextDecoder();
       var buf = "";
-      var raf = 0;
-      var paint = function () {
-        raf = 0;
-        updateAssistant(el, asst, true);
-        scrollBottom();
-      };
 
       for (;;) {
         var r = await reader.read();
@@ -370,16 +375,26 @@
             if (j.message.thinking) asst.thinking += j.message.thinking;
             if (j.message.content) asst.content += j.message.content;
           }
-          if (j.done && j.eval_count && j.eval_duration) {
-            asst.stats = (j.eval_count / (j.eval_duration / 1e9)).toFixed(1) + " tok/s";
+          if (j.done) {
+            if (j.eval_count && j.eval_duration) {
+              asst.stats = (j.eval_count / (j.eval_duration / 1e9)).toFixed(1) + " tok/s";
+            }
+            gotDone = true;
+            break;
           }
         }
+        if (gotDone) break;
         if (!raf) raf = requestAnimationFrame(paint);
       }
     } catch (err) {
       if (err && err.name === "AbortError") asst.stats = "stopped";
       else asst.error = (err && err.message) || String(err);
     } finally {
+      finished = true;
+      if (raf) cancelAnimationFrame(raf);
+      if (reader) {
+        try { await reader.cancel(); } catch (e) {}
+      }
       abort = null;
       sendBtn.classList.remove("stop");
       sendBtn.textContent = "↑";
