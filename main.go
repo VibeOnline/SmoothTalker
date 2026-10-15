@@ -19,7 +19,6 @@ import (
 const (
 	target        = "http://127.0.0.1:11434"
 	listenAddr    = ":1337"
-	routerModel   = "tev1:0.8b"
 	fallbackModel = "gemma4:e2b-mlx"
 	maxBodyBytes  = 10 << 20 // 10 MiB
 )
@@ -144,19 +143,46 @@ func chooseModel(ctx context.Context, req map[string]any, path string) string {
 		return fallbackModel
 	}
 
-	// Exclude the router itself from the candidates.
+	// Dynamically identify the router model: look for one with "decision" capability.
+	var currentRouter *ollamaModel
+	for i := range models {
+		m := &models[i]
+		for _, cap := range m.Capabilities {
+			if cap == "decision" {
+				currentRouter = m
+				break
+			}
+		}
+		if currentRouter != nil {
+			break
+		}
+	}
+
+	if currentRouter == nil {
+		log.Printf("No model with 'decision' capability found. Falling back to %s.", fallbackModel)
+		return fallbackModel
+	}
+
+	// Exclude all decision models from the candidates to prevent routing to another router.
 	candidates := make(map[string]string)
 	for _, m := range models {
-		if m.Name != routerModel {
+		isDecisionModel := false
+		for _, cap := range m.Capabilities {
+			if cap == "decision" {
+				isDecisionModel = true
+				break
+			}
+		}
+		if !isDecisionModel {
 			candidates[m.Name] = describeModel(m)
 		}
 	}
 	if len(candidates) == 0 {
-		log.Printf("No candidate models available. Falling back to %s.", fallbackModel)
+		log.Printf("No candidate models available (excluding decision models). Falling back to %s.", fallbackModel)
 		return fallbackModel
 	}
 
-	state := extractInput(req, path)
+	state := extractInput(req, path, currentRouter)
 	if hint := requestHints(req); hint != "" {
 		if state == "Empty request" {
 			state = hint
@@ -165,7 +191,7 @@ func chooseModel(ctx context.Context, req map[string]any, path string) string {
 		}
 	}
 
-	choice, err := askRouter(ctx, state, candidates)
+	choice, err := askRouter(ctx, state, candidates, currentRouter.Name)
 	if err != nil {
 		log.Printf("Router failed: %v. Falling back to %s.", err, fallbackModel)
 		return fallbackModel
@@ -175,7 +201,7 @@ func chooseModel(ctx context.Context, req map[string]any, path string) string {
 		return fallbackModel
 	}
 
-	log.Printf("Router (%s) chose model: %s", routerModel, choice)
+	log.Printf("Router (%s) chose model: %s", currentRouter.Name, choice)
 	return choice
 }
 
@@ -206,7 +232,7 @@ func fetchModels(ctx context.Context) ([]ollamaModel, error) {
 	return names, nil
 }
 
-func askRouter(ctx context.Context, input string, candidates map[string]string) (string, error) {
+func askRouter(ctx context.Context, input string, candidates map[string]string, routerModel string) (string, error) {
 	payload := map[string]any{
 		"model": routerModel,
 		"state": input,
@@ -346,7 +372,7 @@ func requestHints(req map[string]any) string {
 
 // extractInput pulls the system prompt (if any) and the latest user text so
 // the router sees request context, without producing "<nil>".
-func extractInput(req map[string]any, path string) string {
+func extractInput(req map[string]any, path string, router *ollamaModel) string {
 	var parts []string
 	if path == "/api/chat" || path == "/v1/chat/completions" {
 		if msgs, ok := req["messages"].([]any); ok {
@@ -374,8 +400,31 @@ func extractInput(req map[string]any, path string) string {
 	} else if prompt, _ := req["prompt"].(string); prompt != "" {
 		parts = append(parts, "User: "+prompt)
 	}
-	if len(parts) == 0 {
+
+	res := strings.Join(parts, "\n\n")
+	if res == "" {
 		return "Empty request"
 	}
-	return strings.Join(parts, "\n\n")
+
+	// Truncate to avoid exceeding router's context limit.
+	// We use the router's actual context length if available, otherwise fallback to 2048 tokens.
+	// Subtract some buffer (e.g., 256 tokens) for the instructions and candidates.
+	maxTokens := 2048
+	if router != nil && router.Details.ContextLength > 0 {
+		maxTokens = router.Details.ContextLength
+	}
+
+	effectiveMaxTokens := maxTokens - 256
+	if effectiveMaxTokens < 1 {
+		effectiveMaxTokens = 1
+	}
+
+	// Rough heuristic: 1 token approx 3 chars. Using 3 to be safer.
+	maxChars := effectiveMaxTokens * 3
+
+	if len(res) > maxChars {
+		truncatedText := "... [truncated]"
+		return res[:maxChars-len(truncatedText)] + truncatedText
+	}
+	return res
 }
