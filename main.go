@@ -104,11 +104,19 @@ func main() {
 	}
 	proxy := httputil.NewSingleHostReverseProxy(remote)
 
+	uiMux := http.NewServeMux()
+	registerToolAdmin(uiMux)
+
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Frontend-only chat endpoint: Lua tools enabled.
 		if r.Method == http.MethodPost && r.URL.Path == "/ui/api/chat" {
 			r.URL.Path = "/api/chat" // upstream path for callUpstream
 			handleChat(w, r, chatOpts{luaTools: true})
+			return
+		}
+
+		if strings.HasPrefix(r.URL.Path, "/ui/api/tools") {
+			uiMux.ServeHTTP(w, r)
 			return
 		}
 

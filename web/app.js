@@ -30,7 +30,7 @@
   var FENCE = BT + BT + BT;
 
   function esc(s) {
-    return s.replace(/&/g, "&").replace(/</g, "<").replace(/>/g, ">").replace(/"/g, "\"");
+    return s.replace(/&/g, "&").replace(/</g, "<").replace(/>/g, ">").replace(/\"/g, "\"");
   }
 
   // Code spans are pulled out first so bold/italic/link rules never touch them.
@@ -530,6 +530,7 @@
   openSettingsBtn.onclick = function () {
     settingsScreen.style.display = "block";
     loadMcpServers();
+    loadLuaTools();
   };
   closeSettingsBtn.onclick = function () {
     settingsScreen.style.display = "none";
@@ -641,6 +642,209 @@
       });
     } catch (e) { console.error("Failed to load MCP servers", e); }
   }
+
+  // ---------- Lua Tools Integration ----------
+  var TOOL_TEMPLATE = "return {\n  name = \"my_tool\",\n  description = \"Describe what the tool does so the model knows when to use it.\",\n  parameters = {\n    type = \"object\",\n    properties = {\n      path = { type = \"string\", description = \"Path relative to the workspace\" },\n    },\n    required = { \"path\" },\n  },\n  run = function(args)\n    local data, err = fs.read(args.path)\n    if not data then return nil, err end\n    return { path = args.path, bytes = #data }\n  end,\n}";
+  
+  var toolEls = {
+    list: $("settings-tool-list"),
+    modal: $("tool-modal"),
+    title: $("tool-modal-title"),
+    source: $("tool-source"),
+    status: $("tool-status"),
+    testArgs: $("tool-test-args"),
+    testOut: $("tool-test-output"),
+    testPanel: $("tool-test-panel"),
+    del: $("tool-delete"),
+  };
+  var editingTool = null;
+
+  function setToolStatus(msg, kind) {
+    if (!toolEls.status) return;
+    toolEls.status.textContent = msg;
+    toolEls.status.style.color = kind === "error" ? "#c0392b" : kind === "ok" ? "#2e8b57" : "var(--muted)";
+  }
+
+  async function toolApi(path, opts) {
+    opts = opts || {};
+    var res = await fetch("/ui/api/tools" + path, {
+      headers: { "Content-Type": "application/json" },
+      ...opts,
+    });
+    if (res.status === 204) return null;
+    var data = await res.json().catch(function() { return {}; });
+    if (!res.ok) throw new Error(data.error || res.statusText);
+    return data;
+  }
+
+  async function loadLuaTools() {
+    if (!toolEls.list) return;
+    toolEls.list.innerHTML = "";
+    try {
+      var tools = await toolApi("");
+      if (!tools || !tools.length) {
+        toolEls.list.innerHTML = "<div style=\"opacity:.7;font-size:.9rem\">No tools yet.</div>";
+        return;
+      }
+      tools.forEach(function(t) {
+        var row = document.createElement("div");
+        row.style.cssText = "display:flex;align-items:center;gap:12px;padding:.75rem 1rem;background:var(--surface);border:1px solid var(--border);border-radius:10px;cursor:pointer;";
+        
+        var icon = document.createElement("i");
+        icon.className = "fa-solid fa-screwdriver-wrench";
+        icon.style.color = "var(--accent)";
+        
+        var content = document.createElement("div");
+        content.style.cssText = "flex:1;min-width:0";
+        
+        var nameEl = document.createElement("div");
+        nameEl.style.fontWeight = "600";
+        nameEl.style.fontFamily = "ui-monospace,monospace";
+        nameEl.textContent = t.name;
+        
+        var descEl = document.createElement("div");
+        descEl.style.fontSize = ".85rem";
+        descEl.style.color = "var(--muted)";
+        descEl.style.whiteSpace = "nowrap";
+        descEl.style.overflow = "hidden";
+        descEl.style.textOverflow = "ellipsis";
+        if (t.loaded) {
+          descEl.textContent = t.description || "";
+        } else {
+          descEl.innerHTML = '<span style="color:#c0392b">⚠ failed to load. Open it to see the error.</span>';
+        }
+        
+        content.appendChild(nameEl);
+        content.appendChild(descEl);
+        row.appendChild(icon);
+        row.appendChild(content);
+        row.onclick = function() { openToolEditor(t.name); };
+        toolEls.list.appendChild(row);
+      });
+    } catch (e) {
+      var errEl = document.createElement("div");
+      errEl.style.opacity = ".7";
+      errEl.style.fontSize = ".9rem";
+      errEl.textContent = "Failed to load tools: " + (e.message || "Unknown error");
+      toolEls.list.appendChild(errEl);
+    }
+  }
+
+  async function openToolEditor(name) {
+    editingTool = name;
+    toolEls.title.textContent = name ? "Edit " + name : "New Tool";
+    toolEls.del.style.display = name ? "" : "none";
+    toolEls.testPanel.style.display = name ? "" : "none";
+    toolEls.testOut.textContent = "";
+    setToolStatus("");
+    toolEls.source.value = name ? "Loading..." : TOOL_TEMPLATE;
+    toolEls.modal.style.display = "flex";
+    if (name) {
+      try {
+        var data = await toolApi("/" + encodeURIComponent(name));
+        toolEls.source.value = data.source;
+        validateTool();
+      } catch (e) {
+        setToolStatus(e.message, "error");
+      }
+    }
+  }
+
+  async function validateTool() {
+    try {
+      var t = await toolApi("/validate", {
+        method: "POST",
+        body: JSON.stringify({ source: toolEls.source.value }),
+      });
+      setToolStatus("✓ Valid: " + t.name, "ok");
+      return t;
+    } catch (e) {
+      setToolStatus(e.message, "error");
+      return null;
+    }
+  }
+
+  async function saveTool() {
+    var t = await validateTool();
+    if (!t) return;
+    if (editingTool && editingTool !== t.name && !confirm("The tool name changed from \"" + editingTool + "\" to \"" + t.name + "\". Save it as a new tool and delete the old one?")) {
+      return;
+    }
+    try {
+      await toolApi("/" + encodeURIComponent(t.name), {
+        method: "PUT",
+        body: JSON.stringify({ source: toolEls.source.value }),
+      });
+      if (editingTool && editingTool !== t.name) {
+        await toolApi("/" + encodeURIComponent(editingTool), { method: "DELETE" });
+      }
+      editingTool = t.name;
+      toolEls.title.textContent = "Edit " + t.name;
+      toolEls.del.style.display = "";
+      toolEls.testPanel.style.display = "";
+      setToolStatus("✓ Saved " + t.name + ".lua", "ok");
+      loadLuaTools();
+    } catch (e) {
+      setToolStatus(e.message, "error");
+    }
+  }
+
+  async function deleteTool() {
+    if (!editingTool || !confirm("Delete tool \"" + editingTool + "\"?")) return;
+    try {
+      await toolApi("/" + encodeURIComponent(editingTool), { method: "DELETE" });
+      toolEls.modal.style.display = "none";
+      loadLuaTools();
+    } catch (e) {
+      setToolStatus(e.message, "error");
+    }
+  }
+
+  async function testTool() {
+    var args;
+    try {
+      args = JSON.parse(toolEls.testArgs.value || "{}");
+    } catch (e) {
+      toolEls.testOut.textContent = "Arguments must be valid JSON.";
+      return;
+    }
+    toolEls.testOut.textContent = "Running...";
+    try {
+      var r = await toolApi("/" + encodeURIComponent(editingTool) + "/test", {
+        method: "POST",
+        body: JSON.stringify({ args: args }),
+      });
+      var out = r.result;
+      try { out = JSON.stringify(JSON.parse(out), null, 2); } catch (_) {}
+      toolEls.testOut.textContent = "(" + r.durationMs + " ms)\n" + out;
+    } catch (e) {
+      toolEls.testOut.textContent = e.message;
+    }
+  }
+
+  // Lua Tool Key Events
+  if (toolEls.source) {
+    toolEls.source.addEventListener("keydown", function (e) {
+      if (e.key === "Tab") {
+        e.preventDefault();
+        var s = toolEls.source.selectionStart;
+        var end = toolEls.source.selectionEnd;
+        var val = toolEls.source.value;
+        toolEls.source.value = val.slice(0, s) + "  " + val.slice(end);
+        toolEls.source.selectionStart = toolEls.source.selectionEnd = s + 2;
+      } else if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+        e.preventDefault();
+        saveTool();
+      }
+    });
+  }
+
+  if ($("new-tool")) $("new-tool").onclick = function() { openToolEditor(); };
+  if ($("close-tool-modal")) $("close-tool-modal").onclick = function() { toolEls.modal.style.display = "none"; };
+  if ($("tool-validate")) $("tool-validate").onclick = validateTool;
+  if ($("tool-save")) $("tool-save").onclick = saveTool;
+  if ($("tool-delete")) $("tool-delete").onclick = deleteTool;
+  if ($("tool-test")) $("tool-test").onclick = testTool;
 
   // ---------- Init ----------
   load();
