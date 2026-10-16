@@ -216,12 +216,18 @@
     }
 
     if (!streaming) {
-      c.querySelector("[data-act=\"copy\"]").onclick = function (e) {
-        navigator.clipboard.writeText(m.content || "");
-        e.target.textContent = "Copied";
-        setTimeout(function () { e.target.textContent = "Copy"; }, 1200);
-      };
-      c.querySelector("[data-act=\"retry\"]").onclick = retryLast;
+      var copyBtn = c.querySelector("[data-act=\"copy\"]");
+      if (copyBtn) {
+        copyBtn.onclick = function (e) {
+          navigator.clipboard.writeText(m.content || "");
+          e.target.textContent = "Copied";
+          setTimeout(function () { e.target.textContent = "Copy"; }, 1200);
+        };
+      }
+      var retryBtn = c.querySelector("[data-act=\"retry\"]");
+      if (retryBtn) {
+        retryBtn.onclick = retryLast;
+      }
     }
   }
 
@@ -352,7 +358,7 @@
     };
 
     try {
-      var resp = await fetch("/api/chat", {
+      var resp = await fetch("/ui/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -364,6 +370,7 @@
       }
 
       reader = resp.body.getReader();
+
       var dec = new TextDecoder();
       var buf = "";
 

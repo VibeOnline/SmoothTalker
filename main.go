@@ -31,6 +31,10 @@ const (
 	mcpToolTimeout  = 10 * time.Second
 )
 
+type chatOpts struct {
+	luaTools bool // expose and execute Lua tool scripts (web frontend only)
+}
+
 // Side calls (tags + router): bounded timeout.
 var client = &http.Client{Timeout: 60 * time.Second}
 
@@ -92,6 +96,7 @@ func main() {
 	defer cancel()
 	InitRegistry(ctx)
 	defer GlobalRegistry.Shutdown()
+	InitLuaTools()
 
 	remote, err := url.Parse(target)
 	if err != nil {
@@ -100,6 +105,13 @@ func main() {
 	proxy := httputil.NewSingleHostReverseProxy(remote)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Frontend-only chat endpoint: Lua tools enabled.
+		if r.Method == http.MethodPost && r.URL.Path == "/ui/api/chat" {
+			r.URL.Path = "/api/chat" // upstream path for callUpstream
+			handleChat(w, r, chatOpts{luaTools: true})
+			return
+		}
+
 		if handleWeb(w, r) {
 			return
 		}
@@ -113,7 +125,7 @@ func main() {
 		if r.Method == http.MethodPost {
 			switch r.URL.Path {
 			case "/api/chat", "/v1/chat/completions":
-				handleChat(w, r)
+				handleChat(w, r, chatOpts{}) // no Lua tools
 				return
 			case "/api/generate":
 				req, ok := prepareRequest(w, r)
@@ -140,7 +152,7 @@ func main() {
 
 // ---------- chat handling with MCP tool loop ----------
 
-func handleChat(w http.ResponseWriter, r *http.Request) {
+func handleChat(w http.ResponseWriter, r *http.Request, opts chatOpts) {
 	req, ok := prepareRequest(w, r)
 	if !ok {
 		return
@@ -149,7 +161,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	isOpenAI := r.URL.Path == "/v1/chat/completions"
 	wantStream := streamRequested(req, isOpenAI)
 
-	injectMCPTools(ctx, req)
+	injectMCPTools(ctx, req, opts)
 
 	// Always talk to Ollama non-streaming so we can inspect tool calls;
 	// we convert back to the client's requested format at the end.
@@ -178,7 +190,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 
 		msg := assistantMessage(resp, isOpenAI)
 		calls := toolCallsOf(msg)
-		if len(calls) == 0 || !allMCPCalls(calls) {
+		if len(calls) == 0 || !allServerCalls(calls, opts) {
 			// Either a normal answer or the client's own tools: hand it back.
 			writeFinal(w, body, resp, isOpenAI, wantStream)
 			return
@@ -188,9 +200,9 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		msgs, _ := req["messages"].([]any)
 		msgs = append(msgs, msg)
 		for _, call := range calls {
-			name, _, _ := extractToolCall(call)
-			result, _ := handleMCPCall(ctx, call)
-			log.Printf("MCP tool %s -> %d bytes", name, len(result))
+			name, _ := toolCallNameArgs(call)
+			result := dispatchToolCall(ctx, call, opts)
+			log.Printf("tool %s -> %d bytes", name, len(result))
 
 			toolMsg := map[string]any{"role": "tool", "content": result}
 			if isOpenAI {
@@ -271,10 +283,14 @@ func toolCallsOf(msg map[string]any) []map[string]any {
 	return out
 }
 
-func isMCPCall(call map[string]any) bool {
+// isServerCall reports whether the proxy should execute this call itself.
+func isServerCall(call map[string]any, opts chatOpts) bool {
 	name, _, ok := extractToolCall(call)
 	if !ok {
 		return false
+	}
+	if opts.luaTools && LuaTools.Has(name) {
+		return true
 	}
 	if name == "mcp_discover" {
 		return true
@@ -287,9 +303,9 @@ func isMCPCall(call map[string]any) bool {
 	return err == nil
 }
 
-func allMCPCalls(calls []map[string]any) bool {
+func allServerCalls(calls []map[string]any, opts chatOpts) bool {
 	for _, c := range calls {
-		if !isMCPCall(c) {
+		if !isServerCall(c, opts) {
 			return false
 		}
 	}
@@ -359,7 +375,7 @@ func writeFinal(w http.ResponseWriter, body []byte, resp map[string]any, isOpenA
 // injectMCPTools adds mcp_discover plus every tool exposed by connected MCP
 // servers (as "server.tool"), but only if the request already has tools or
 // the target model advertises tool support.
-func injectMCPTools(ctx context.Context, req map[string]any) {
+func injectMCPTools(ctx context.Context, req map[string]any, opts chatOpts) {
 	tools, hasTools := req["tools"].([]any)
 	model, _ := req["model"].(string)
 	if !hasTools && !modelSupportsTools(ctx, model) {
@@ -389,6 +405,17 @@ func injectMCPTools(ctx context.Context, req map[string]any) {
 		add(t)
 	}
 	req["tools"] = tools
+
+	add(discoverTool)
+	if opts.luaTools {
+		for _, t := range LuaTools.Definitions() {
+			add(t)
+		}
+	}
+	for _, t := range mcpToolDefinitions(ctx) {
+		add(t)
+	}
+	req["tools"] = tools
 }
 
 var mcpToolCache struct {
@@ -398,7 +425,7 @@ var mcpToolCache struct {
 }
 
 // mcpToolDefinitions converts MCP tools/list results into OpenAI-style tool definitions.
-func mcpToolDefinitions(ctx context.Context) []map[string]any {
+func mcpToolDefinitions(_ context.Context) []map[string]any {
 	mcpToolCache.Lock()
 	defer mcpToolCache.Unlock()
 	if time.Since(mcpToolCache.at) < modelCacheTTL {

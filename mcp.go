@@ -552,8 +552,8 @@ func handleToolResponse(body []byte) (string, bool) {
 		return "", false
 	}
 
-	result, handled := handleMCPCall(context.Background(), toolCalls[0])
-	if !handled {
+	result, err := handleMCPCall(context.Background(), toolCalls[0])
+	if err != nil {
 		return "", false
 	}
 	log.Printf("Handled MCP tool call: %s", result)
@@ -590,41 +590,41 @@ func extractToolCall(call map[string]any) (string, map[string]any, bool) {
 	return name, args, true
 }
 
-func handleMCPCall(_ context.Context, call map[string]any) (string, bool) {
+func handleMCPCall(ctx context.Context, call map[string]any) (string, error) {
 	funcName, args, ok := extractToolCall(call)
 	if !ok {
-		return "", false
+		return "", fmt.Errorf("invalid tool call")
 	}
 	if GlobalRegistry == nil {
-		return "MCP registry not initialized.", true
+		return "", fmt.Errorf("MCP registry not initialized")
 	}
 
 	if funcName == "mcp_discover" {
 		servers := GlobalRegistry.Discover()
 		if len(servers) == 0 {
-			return "No active MCP servers found. Please configure one in Settings.", true
+			return "No active MCP servers found. Please configure one in Settings.", nil
 		}
 		res, _ := json.Marshal(servers)
-		return string(res), true
+		return string(res), nil
 	}
 
 	// "server_name.tool_name"
 	parts := strings.SplitN(funcName, ".", 2)
 	if len(parts) != 2 {
-		return "", false
+		return "", fmt.Errorf("invalid tool name format: expected server.tool")
 	}
 	serverName, toolName := parts[0], parts[1]
 
 	client, err := GlobalRegistry.GetClient(serverName)
 	if err != nil {
-		return fmt.Sprintf("MCP server %s not found: %v", serverName, err), true
+		return "", fmt.Errorf("MCP server %s not found: %v", serverName, err)
 	}
 
 	result, err := client.CallTool(toolName, args, 30*time.Second)
 	if err != nil {
-		return fmt.Sprintf("MCP call failed on server %s: %v", serverName, err), true
+		return "", fmt.Errorf("MCP call failed on server %s: %v", serverName, err)
 	}
-	return string(result), true
+	return string(result), nil
 }
 
 // ---------- Self-tests ----------
