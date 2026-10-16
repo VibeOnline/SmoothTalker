@@ -6,7 +6,10 @@
   var sidebar = $("sidebar"), listEl = $("convo-list"), messagesEl = $("messages"),
       welcomeEl = $("welcome"), scrollEl = $("scroll"), inputEl = $("input"),
       sendBtn = $("send"), modelSel = $("model"), titleEl = $("chat-title"),
-      statusEl = $("status");
+      statusEl = $("status"), mcpListEl = $("mcp-list"), openSettingsBtn = $("open-settings"),
+      settingsScreen = $("settings-screen"), closeSettingsBtn = $("close-settings"), mcpSaveBtn = $("mcp-save"),
+      mcpSettingsListEl = $("settings-mcp-list"), mcpNameIn = $("mcp-name"),
+      mcpCmdIn = $("mcp-cmd"), mcpArgsIn = $("mcp-args"), themeSel = $("theme-select");
 
   // ---------- State ----------
   var STORE_KEY = "chat.convos.v1";
@@ -17,7 +20,7 @@
   var modelsMeta = {};
 
   function load() {
-    try { convos = JSON.parse(localStorage.getItem(STORE_KEY) || "[]"); } catch (e) { convos = []; }
+    try { convos = JSON.parse(localStorage.getItem(STORE_KEY) || "[]"); } catch { convos = []; }
   }
   function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
 
@@ -272,8 +275,8 @@
 
   function persist() {
     // Empty "New chat" conversations only live in memory.
-    var keep = convos.filter(function (c) { return c.messages.length > 0; });
-    try { localStorage.setItem(STORE_KEY, JSON.stringify(keep)); } catch (e) {}
+    var keep = convos.filter(function (c) { return c.messages && c.messages.length > 0; });
+    try { localStorage.setItem(STORE_KEY, JSON.stringify(keep)); } catch { }
   }
 
   // ---------- Sending ----------
@@ -368,7 +371,7 @@
           buf = buf.slice(nl + 1);
           if (!line) continue;
           var j;
-          try { j = JSON.parse(line); } catch (e) { continue; }
+          try { j = JSON.parse(line); } catch { continue; }
           if (j.error) throw new Error(typeof j.error === "string" ? j.error : JSON.stringify(j.error));
           if (j.model) asst.model = j.model;
           if (j.message) {
@@ -393,7 +396,7 @@
       finished = true;
       if (raf) cancelAnimationFrame(raf);
       if (reader) {
-        try { await reader.cancel(); } catch (e) {}
+        try { await reader.cancel(); } catch { }
       }
       abort = null;
       sendBtn.classList.remove("stop");
@@ -439,7 +442,7 @@
       var saved = localStorage.getItem(MODEL_KEY);
       if (saved && modelsMeta[saved] !== undefined) modelSel.value = saved;
       statusEl.textContent = (j.models.length - 1) + " models · fallback " + j.fallback;
-    } catch (e) {
+    } catch {
       modelSel.innerHTML = "<option value=\"recommended\">recommended</option>";
       statusEl.textContent = "Could not load models";
     }
@@ -462,12 +465,145 @@
     localStorage.setItem(MODEL_KEY, modelSel.value);
   });
 
+  // Theme Management
+  function applyTheme(theme) {
+    var root = document.documentElement;
+    root.classList.remove("dark-theme", "light-theme");
+    if (theme === "dark") {
+      root.classList.add("dark-theme");
+    } else if (theme === "light") {
+      root.classList.add("light-theme");
+    } else if (theme === "system") {
+      if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+        root.classList.add("dark-theme");
+      }
+    }
+    localStorage.setItem("chat.theme.v1", theme);
+    
+    // Update PWA window decoration color
+    if (typeof updateThemeColor === "function") {
+      updateThemeColor();
+    }
+  }
+
+  // Listen for system theme changes when set to 'system'
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function() {
+    if (localStorage.getItem("chat.theme.v1") === "system" || !localStorage.getItem("chat.theme.v1")) {
+      applyTheme("system");
+    }
+  });
+
+  themeSel.onchange = function () {
+    applyTheme(this.value);
+  };
+
+  // Settings Events
+  openSettingsBtn.onclick = function () {
+    settingsScreen.style.display = "block";
+    loadMcpServers();
+  };
+  closeSettingsBtn.onclick = function () {
+    settingsScreen.style.display = "none";
+  };
+  mcpSaveBtn.onclick = async function () {
+    var name = mcpNameIn.value.trim();
+    var cmd = mcpCmdIn.value.trim();
+    var argsStr = mcpArgsIn.value.trim();
+    if (!name || !cmd) { alert("Name and Command are required"); return; }
+    var args = argsStr ? argsStr.split(",").map(function (s) { return s.trim(); }) : [];
+    
+    try {
+      var r = await fetch("/web/mcp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "add", config: { name: name, command: cmd, args: args } })
+      });
+      if (!r.ok) throw new Error(await r.text());
+      mcpNameIn.value = ""; mcpCmdIn.value = ""; mcpArgsIn.value = "";
+      loadMcpServers();
+    } catch (e) { alert("Error: " + e.message); }
+  };
+
+  async function loadMcpServers() {
+    try {
+      var r = await fetch("/web/mcp");
+      var servers = await r.json();
+      
+      mcpListEl.innerHTML = "";
+      mcpSettingsListEl.innerHTML = "";
+      
+      Object.keys(servers).forEach(function (name) {
+        var s = servers[name];
+        
+        // Sidebar list
+        var sItem = document.createElement("div");
+        sItem.style.padding = "4px 8px";
+        sItem.style.borderRadius = "6px";
+        sItem.style.fontSize = "0.8rem";
+        sItem.style.opacity = "0.8";
+        sItem.style.cursor = "default";
+        sItem.onmouseover = function() { this.style.background = "var(--surface)"; this.style.opacity = "1"; };
+        sItem.onmouseout = function() { this.style.background = "transparent"; this.style.opacity = "0.8"; };
+        sItem.textContent = "✳ " + name;
+        mcpListEl.appendChild(sItem);
+        
+        // Settings list
+        var mItem = document.createElement("div");
+        mItem.style.display = "flex";
+        mItem.style.justifyContent = "space-between";
+        mItem.style.alignItems = "center";
+        mItem.style.padding = "12px";
+        mItem.style.background = "var(--surface)";
+        mItem.style.border = "1px solid var(--border)";
+        mItem.style.borderRadius = "8px";
+        
+        var info = document.createElement("span");
+        info.textContent = name + " (" + s.command + ")";
+        
+        var del = document.createElement("button");
+        del.textContent = "✕";
+        del.title = "Remove";
+        del.style.background = "transparent";
+        del.style.color = "var(--text)";
+        del.style.border = "1px solid var(--border)";
+        del.style.borderRadius = "4px";
+        del.style.cursor = "pointer";
+        del.style.padding = "2px 8px";
+        del.style.fontSize = "0.8rem";
+        del.style.opacity = "0.7";
+        del.style.transition = "opacity .15s";
+        del.onmouseover = function() { this.style.opacity = "1"; };
+        del.onmouseout = function() { this.style.opacity = "0.7"; };
+        del.onclick = async function () {
+          try {
+            var dr = await fetch("/web/mcp", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ action: "remove", name: name })
+            });
+            if (!dr.ok) throw new Error(await dr.text());
+            loadMcpServers();
+          } catch (e) { alert("Error: " + e.message); }
+        };
+        
+        mItem.appendChild(info);
+        mItem.appendChild(del);
+        mcpSettingsListEl.appendChild(mItem);
+      });
+    } catch (e) { console.error("Failed to load MCP servers", e); }
+  }
+
   // ---------- Init ----------
   load();
+  var savedTheme = localStorage.getItem("chat.theme.v1") || "system";
+  themeSel.value = savedTheme;
+  applyTheme(savedTheme);
+  
   convos = convos.filter(function (c) { return c.messages && c.messages.length; });
   loadModels().then(function () {
     if (convos.length) { current = convos[0]; renderList(); renderMessages(); }
     else newConvo();
     autosize();
   });
+  loadMcpServers();
 })();

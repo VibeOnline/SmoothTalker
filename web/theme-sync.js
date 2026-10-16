@@ -1,6 +1,16 @@
 async function updateThemeColor() {
-  const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-  const color = isDark ? '#1f1e1d' : '#f0eee6';
+  const theme = localStorage.getItem("chat.theme.v1") || "system";
+  let isDark = false;
+  
+  if (theme === "dark") {
+    isDark = true;
+  } else if (theme === "light") {
+    isDark = false;
+  } else {
+    isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+  }
+  
+  const color = isDark ? '#262624' : '#faf9f5';
   
   // Update meta tag
   let meta = document.querySelector('meta[name="theme-color"]');

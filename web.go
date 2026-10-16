@@ -29,11 +29,19 @@ var webAssets = func() http.Handler {
 //	GET /app.js      -> web/app.js
 //	GET /web/models  -> candidate models for the picker ("recommended" first)
 func handleWeb(w http.ResponseWriter, r *http.Request) bool {
+	if r.Method == http.MethodPost && r.URL.Path == "/web/mcp" {
+		handleMCPWeb(w, r)
+		return true
+	}
+
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		return false
 	}
 
 	switch r.URL.Path {
+	case "/web/mcp":
+		serveMCPWeb(w, r.Context())
+		return true
 	case "/web/models":
 		serveWebModels(w, r.Context())
 		return true
@@ -46,6 +54,49 @@ func handleWeb(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	return false
+}
+
+func serveMCPWeb(w http.ResponseWriter, ctx context.Context) {
+	servers := GlobalRegistry.Discover()
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(servers)
+}
+
+func handleMCPWeb(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Action string    `json:"action"`
+		Config MCPConfig `json:"config"`
+		Name   string    `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	switch req.Action {
+	case "add":
+		if req.Config.Name == "" {
+			http.Error(w, "Name is required", http.StatusBadRequest)
+			return
+		}
+		if err := GlobalRegistry.AddServer(req.Config); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	case "remove":
+		if req.Name == "" {
+			http.Error(w, "Name is required", http.StatusBadRequest)
+			return
+		}
+		GlobalRegistry.RemoveServer(req.Name)
+	default:
+		http.Error(w, "Invalid action", http.StatusBadRequest)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("ok"))
 }
 
 type webModel struct {

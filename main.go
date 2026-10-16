@@ -29,6 +29,34 @@ const (
 // Used only for the proxy's own side calls (tags + router), not for proxied traffic.
 var client = &http.Client{Timeout: 60 * time.Second}
 
+// Tool definition for the built-in discovery tool.
+var discoverTool = map[string]any{
+	"type": "function",
+	"function": map[string]any{
+		"name":        "mcp_discover",
+		"description": "Lists all active MCP servers and their configured commands. Use this to find available tools and capabilities provided by external servers.",
+		"parameters": map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+		},
+	},
+}
+
+// handleMCPCall intercepts tool calls to 'mcp_discover' and returns the current registry state.
+func handleMCPCall(_ context.Context, toolCall map[string]any) (string, bool) {
+	name, _ := toolCall["name"].(string)
+	if name != "mcp_discover" {
+		return "", false
+	}
+
+	servers := GlobalRegistry.Discover()
+	res, err := json.Marshal(servers)
+	if err != nil {
+		return fmt.Sprintf("Error discovering servers: %v", err), true
+	}
+	return string(res), true
+}
+
 //go:embed RouterSystemPrompt.md
 var routerSystemPrompt string
 
@@ -64,6 +92,13 @@ type routerResponse struct {
 }
 
 func main() {
+	// Run MCP Core verification before starting the server
+	runMCPCoreTest()
+	runMCPRegistryTest()
+	runMCPDiscoverTest()
+
+	InitRegistry(context.Background())
+
 	remote, err := url.Parse(target)
 	if err != nil {
 		log.Fatal("Invalid target URL: ", err)
@@ -116,6 +151,17 @@ func rewriteRequest(w http.ResponseWriter, r *http.Request) bool {
 	if err := json.Unmarshal(body, &req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
 		return false
+	}
+
+	// Inject the built-in MCP discover tool into the tools list if present
+	if tools, ok := req["tools"].([]any); ok {
+		tools = append(tools, discoverTool)
+		req["tools"] = tools
+	} else if r.Method == http.MethodPost {
+		// If no tools are present, but the model is capable of tool calling,
+		// we can optionally inject the discover tool here to ensure the LLM
+		// always has a way to find MCP servers.
+		req["tools"] = []any{discoverTool}
 	}
 
 	if model, _ := req["model"].(string); model == "recommended" {

@@ -12,7 +12,7 @@
   --shadow: 0 2px 12px rgba(31, 30, 29, 0.07);
 }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not(.light-theme) {
     --bg: #262624;
     --sidebar: #1f1e1d;
     --surface: #30302e;
@@ -23,6 +23,28 @@
     --code-bg: #1f1e1d;
     --shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
   }
+}
+.dark-theme {
+  --bg: #262624 !important;
+  --sidebar: #1f1e1d !important;
+  --surface: #30302e !important;
+  --text: #ece9df !important;
+  --muted: #9b9a93 !important;
+  --border: #3d3c39 !important;
+  --user-bubble: #3a3936 !important;
+  --code-bg: #1f1e1d !important;
+  --shadow: 0 2px 12px rgba(0, 0, 0, 0.3) !important;
+}
+.light-theme {
+  --bg: #faf9f5 !important;
+  --sidebar: #f0eee6 !important;
+  --surface: #ffffff !important;
+  --text: #1f1e1d !important;
+  --muted: #73726c !important;
+  --border: #e5e2d9 !important;
+  --user-bubble: #f0eee6 !important;
+  --code-bg: #f5f4ee !important;
+  --shadow: 0 2px 12px rgba(31, 30, 29, 0.07) !important;
 }
 /* Theme color for dark mode PWA is handled via manifest or meta, 
    but for the window decoration to match the sidebar in dark mode, 
