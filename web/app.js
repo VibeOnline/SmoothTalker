@@ -9,7 +9,8 @@
       statusEl = $("status"), mcpListEl = $("mcp-list"), openSettingsBtn = $("open-settings"),
       settingsScreen = $("settings-screen"), closeSettingsBtn = $("close-settings"), mcpSaveBtn = $("mcp-save"),
       mcpSettingsListEl = $("settings-mcp-list"), mcpNameIn = $("mcp-name"),
-      mcpCmdIn = $("mcp-cmd"), mcpArgsIn = $("mcp-args"), themeSel = $("theme-select");
+      mcpCmdIn = $("mcp-cmd"), mcpArgsIn = $("mcp-args"), themeSel = $("theme-select"),
+      mcpModal = $("mcp-modal"), openMcpModalBtn = $("open-mcp-modal"), closeMcpModalBtn = $("close-mcp-modal");
 
   // ---------- State ----------
   var STORE_KEY = "chat.convos.v1";
@@ -519,6 +520,15 @@
   closeSettingsBtn.onclick = function () {
     settingsScreen.style.display = "none";
   };
+
+  // Modal & Connector Events
+  openMcpModalBtn.onclick = function () {
+    mcpNameIn.value = ""; mcpCmdIn.value = ""; mcpArgsIn.value = "";
+    mcpModal.style.display = "flex";
+  };
+  closeMcpModalBtn.onclick = function () {
+    mcpModal.style.display = "none";
+  };
   mcpSaveBtn.onclick = async function () {
     var name = mcpNameIn.value.trim();
     var cmd = mcpCmdIn.value.trim();
@@ -533,7 +543,7 @@
         body: JSON.stringify({ action: "add", config: { name: name, command: cmd, args: args } })
       });
       if (!r.ok) throw new Error(await r.text());
-      mcpNameIn.value = ""; mcpCmdIn.value = ""; mcpArgsIn.value = "";
+      mcpModal.style.display = "none";
       loadMcpServers();
     } catch (e) { alert("Error: " + e.message); }
   };
@@ -572,17 +582,38 @@
         mItem.style.borderRadius = "8px";
         
         var info = document.createElement("span");
-        info.textContent = name + " (" + s.command + ")";
+        info.textContent = name;
+        
+        var btnGroup = document.createElement("div");
+        btnGroup.style.display = "flex";
+        btnGroup.style.gap = "8px";
+
+        var editBtn = document.createElement("button");
+        editBtn.innerHTML = '<i class="fa-regular fa-pen-to-square"></i>';
+        editBtn.title = "Edit";
+        editBtn.style.background = "transparent";
+        editBtn.style.color = "var(--text)";
+        editBtn.style.border = "1px solid var(--border)";
+        editBtn.style.borderRadius = "4px";
+        editBtn.style.cursor = "pointer";
+        editBtn.style.padding = "4px 8px";
+        editBtn.style.fontSize = "0.8rem";
+        editBtn.onclick = function () {
+          mcpNameIn.value = name;
+          mcpCmdIn.value = s.command || "";
+          mcpArgsIn.value = (s.args || []).join(", ");
+          mcpModal.style.display = "flex";
+        };
         
         var del = document.createElement("button");
-        del.textContent = "✕";
+        del.innerHTML = '<i class="fa-solid fa-trash-can"></i>';
         del.title = "Remove";
         del.style.background = "transparent";
         del.style.color = "var(--text)";
         del.style.border = "1px solid var(--border)";
         del.style.borderRadius = "4px";
         del.style.cursor = "pointer";
-        del.style.padding = "2px 8px";
+        del.style.padding = "4px 8px";
         del.style.fontSize = "0.8rem";
         del.style.opacity = "0.7";
         del.style.transition = "opacity .15s";
@@ -600,8 +631,11 @@
           } catch (e) { alert("Error: " + e.message); }
         };
         
+        btnGroup.appendChild(editBtn);
+        btnGroup.appendChild(del);
+        
         mItem.appendChild(info);
-        mItem.appendChild(del);
+        mItem.appendChild(btnGroup);
         mcpSettingsListEl.appendChild(mItem);
       });
     } catch (e) { console.error("Failed to load MCP servers", e); }

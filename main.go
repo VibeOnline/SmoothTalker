@@ -14,47 +14,39 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	_ "embed"
 )
 
 const (
-	target        = "http://127.0.0.1:11434"
-	listenAddr    = ":1337"
-	fallbackModel = "gemma4:e2b-mlx"
-	maxBodyBytes  = 10 << 20 // 10 MiB
+	target          = "http://127.0.0.1:11434"
+	listenAddr      = ":1337"
+	fallbackModel   = "gemma4:e2b-mlx"
+	maxBodyBytes    = 10 << 20 // 10 MiB
+	maxUpstreamBody = 64 << 20
+	maxToolRounds   = 8
+	modelCacheTTL   = 30 * time.Second
+	mcpToolTimeout  = 10 * time.Second
 )
 
-// Used only for the proxy's own side calls (tags + router), not for proxied traffic.
+// Side calls (tags + router): bounded timeout.
 var client = &http.Client{Timeout: 60 * time.Second}
 
-// Tool definition for the built-in discovery tool.
+// Chat calls to Ollama: generations can run for minutes, rely on request context instead.
+var upstream = &http.Client{}
+
 var discoverTool = map[string]any{
 	"type": "function",
 	"function": map[string]any{
 		"name":        "mcp_discover",
-		"description": "Lists all active MCP servers and their configured commands. Use this to find available tools and capabilities provided by external servers.",
+		"description": "Lists all active MCP servers and their configured commands. Use this tool first to find which external tools are available. To call a tool on a specific server, use the format 'server_name.tool_name' as the function name.",
 		"parameters": map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
 		},
 	},
-}
-
-// handleMCPCall intercepts tool calls to 'mcp_discover' and returns the current registry state.
-func handleMCPCall(_ context.Context, toolCall map[string]any) (string, bool) {
-	name, _ := toolCall["name"].(string)
-	if name != "mcp_discover" {
-		return "", false
-	}
-
-	servers := GlobalRegistry.Discover()
-	res, err := json.Marshal(servers)
-	if err != nil {
-		return fmt.Sprintf("Error discovering servers: %v", err), true
-	}
-	return string(res), true
 }
 
 //go:embed RouterSystemPrompt.md
@@ -92,12 +84,14 @@ type routerResponse struct {
 }
 
 func main() {
-	// Run MCP Core verification before starting the server
 	runMCPCoreTest()
 	runMCPRegistryTest()
 	runMCPDiscoverTest()
 
-	InitRegistry(context.Background())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	InitRegistry(ctx)
+	defer GlobalRegistry.Shutdown()
 
 	remote, err := url.Parse(target)
 	if err != nil {
@@ -112,13 +106,25 @@ func main() {
 
 		if r.URL.Path == "/health" {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("OK"))
+			_, _ = w.Write([]byte("OK"))
 			return
 		}
 
-		if r.Method == http.MethodPost && (r.URL.Path == "/api/chat" || r.URL.Path == "/api/generate" || r.URL.Path == "/v1/chat/completions") {
-			if !rewriteRequest(w, r) {
-				return // error already written
+		if r.Method == http.MethodPost {
+			switch r.URL.Path {
+			case "/api/chat", "/v1/chat/completions":
+				handleChat(w, r)
+				return
+			case "/api/generate":
+				req, ok := prepareRequest(w, r)
+				if !ok {
+					return
+				}
+				if !setBody(w, r, req) {
+					return
+				}
+				proxy.ServeHTTP(w, r)
+				return
 			}
 		}
 
@@ -132,9 +138,360 @@ func main() {
 	}
 }
 
-// rewriteRequest reads the body, resolves "recommended", injects options,
-// and replaces r.Body. Returns false if it already wrote an error response.
-func rewriteRequest(w http.ResponseWriter, r *http.Request) bool {
+// ---------- chat handling with MCP tool loop ----------
+
+func handleChat(w http.ResponseWriter, r *http.Request) {
+	req, ok := prepareRequest(w, r)
+	if !ok {
+		return
+	}
+	ctx := r.Context()
+	isOpenAI := r.URL.Path == "/v1/chat/completions"
+	wantStream := streamRequested(req, isOpenAI)
+
+	injectMCPTools(ctx, req)
+
+	// Always talk to Ollama non-streaming so we can inspect tool calls;
+	// we convert back to the client's requested format at the end.
+	req["stream"] = false
+
+	for round := 0; round < maxToolRounds; round++ {
+		status, ctype, body, err := callUpstream(ctx, r, req)
+		if err != nil {
+			http.Error(w, "upstream error: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		if status != http.StatusOK {
+			w.Header().Set("Content-Type", ctype)
+			w.WriteHeader(status)
+			_, _ = w.Write(body)
+			return
+		}
+
+		var resp map[string]any
+		if err := json.Unmarshal(body, &resp); err != nil {
+			log.Printf("non-JSON upstream response: %v", err)
+			w.Header().Set("Content-Type", ctype)
+			_, _ = w.Write(body)
+			return
+		}
+
+		msg := assistantMessage(resp, isOpenAI)
+		calls := toolCallsOf(msg)
+		if len(calls) == 0 || !allMCPCalls(calls) {
+			// Either a normal answer or the client's own tools: hand it back.
+			writeFinal(w, body, resp, isOpenAI, wantStream)
+			return
+		}
+
+		// Execute MCP tool calls and feed results back to the model.
+		msgs, _ := req["messages"].([]any)
+		msgs = append(msgs, msg)
+		for _, call := range calls {
+			name, _, _ := extractToolCall(call)
+			result, _ := handleMCPCall(ctx, call)
+			log.Printf("MCP tool %s -> %d bytes", name, len(result))
+
+			toolMsg := map[string]any{"role": "tool", "content": result}
+			if isOpenAI {
+				toolMsg["tool_call_id"] = call["id"]
+			} else {
+				toolMsg["tool_name"] = name
+			}
+			msgs = append(msgs, toolMsg)
+		}
+		req["messages"] = msgs
+	}
+
+	http.Error(w, "too many tool-call rounds", http.StatusBadGateway)
+}
+
+func streamRequested(req map[string]any, isOpenAI bool) bool {
+	if s, ok := req["stream"].(bool); ok {
+		return s
+	}
+	return !isOpenAI // Ollama defaults to streaming, OpenAI does not
+}
+
+func callUpstream(ctx context.Context, orig *http.Request, req map[string]any) (int, string, []byte, error) {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	hr, err := http.NewRequestWithContext(ctx, http.MethodPost, target+orig.URL.Path, bytes.NewReader(payload))
+	if err != nil {
+		return 0, "", nil, err
+	}
+	hr.Header.Set("Content-Type", "application/json")
+	if auth := orig.Header.Get("Authorization"); auth != "" {
+		hr.Header.Set("Authorization", auth)
+	}
+	resp, err := upstream.Do(hr)
+	if err != nil {
+		return 0, "", nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxUpstreamBody))
+	if err != nil {
+		return 0, "", nil, err
+	}
+	ctype := resp.Header.Get("Content-Type")
+	if ctype == "" {
+		ctype = "application/json"
+	}
+	return resp.StatusCode, ctype, body, nil
+}
+
+func assistantMessage(resp map[string]any, isOpenAI bool) map[string]any {
+	if isOpenAI {
+		if choices, ok := resp["choices"].([]any); ok && len(choices) > 0 {
+			if c, ok := choices[0].(map[string]any); ok {
+				if m, ok := c["message"].(map[string]any); ok {
+					return m
+				}
+			}
+		}
+		return nil
+	}
+	m, _ := resp["message"].(map[string]any)
+	return m
+}
+
+func toolCallsOf(msg map[string]any) []map[string]any {
+	if msg == nil {
+		return nil
+	}
+	raw, _ := msg["tool_calls"].([]any)
+	var out []map[string]any
+	for _, t := range raw {
+		if tm, ok := t.(map[string]any); ok {
+			out = append(out, tm)
+		}
+	}
+	return out
+}
+
+func isMCPCall(call map[string]any) bool {
+	name, _, ok := extractToolCall(call)
+	if !ok {
+		return false
+	}
+	if name == "mcp_discover" {
+		return true
+	}
+	parts := strings.SplitN(name, ".", 2)
+	if len(parts) != 2 || GlobalRegistry == nil {
+		return false
+	}
+	_, err := GlobalRegistry.GetClient(parts[0])
+	return err == nil
+}
+
+func allMCPCalls(calls []map[string]any) bool {
+	for _, c := range calls {
+		if !isMCPCall(c) {
+			return false
+		}
+	}
+	return true
+}
+
+// writeFinal emits the non-streaming upstream body in whatever shape the client asked for.
+func writeFinal(w http.ResponseWriter, body []byte, resp map[string]any, isOpenAI, wantStream bool) {
+	w.Header().Del("Content-Length")
+
+	if !wantStream {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+		return
+	}
+
+	if !isOpenAI {
+		// A single Ollama non-stream object is a valid final NDJSON chunk (done:true).
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		_, _ = w.Write(append(body, '\n'))
+		return
+	}
+
+	// OpenAI: convert chat.completion -> one chat.completion.chunk + [DONE].
+	msg := assistantMessage(resp, true)
+	delta := map[string]any{"role": "assistant"}
+	if msg != nil {
+		if c, ok := msg["content"]; ok && c != nil {
+			delta["content"] = c
+		}
+		if tc, ok := msg["tool_calls"].([]any); ok && len(tc) > 0 {
+			for i, t := range tc {
+				if tm, ok := t.(map[string]any); ok {
+					tm["index"] = i
+				}
+			}
+			delta["tool_calls"] = tc
+		}
+	}
+	finish := "stop"
+	if choices, ok := resp["choices"].([]any); ok && len(choices) > 0 {
+		if c, ok := choices[0].(map[string]any); ok {
+			if fr, ok := c["finish_reason"].(string); ok && fr != "" {
+				finish = fr
+			}
+		}
+	}
+	chunk := map[string]any{
+		"id":      resp["id"],
+		"object":  "chat.completion.chunk",
+		"created": resp["created"],
+		"model":   resp["model"],
+		"choices": []any{map[string]any{"index": 0, "delta": delta, "finish_reason": finish}},
+	}
+	if u, ok := resp["usage"]; ok {
+		chunk["usage"] = u
+	}
+	data, _ := json.Marshal(chunk)
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	fmt.Fprintf(w, "data: %s\n\ndata: [DONE]\n\n", data)
+}
+
+// ---------- tool injection ----------
+
+// injectMCPTools adds mcp_discover plus every tool exposed by connected MCP
+// servers (as "server.tool"), but only if the request already has tools or
+// the target model advertises tool support.
+func injectMCPTools(ctx context.Context, req map[string]any) {
+	tools, hasTools := req["tools"].([]any)
+	model, _ := req["model"].(string)
+	if !hasTools && !modelSupportsTools(ctx, model) {
+		return
+	}
+
+	existing := map[string]bool{}
+	for _, t := range tools {
+		if tm, ok := t.(map[string]any); ok {
+			if fn, ok := tm["function"].(map[string]any); ok {
+				if n, ok := fn["name"].(string); ok {
+					existing[n] = true
+				}
+			}
+		}
+	}
+
+	add := func(t map[string]any) {
+		name := t["function"].(map[string]any)["name"].(string)
+		if !existing[name] {
+			tools = append(tools, t)
+			existing[name] = true
+		}
+	}
+	add(discoverTool)
+	for _, t := range mcpToolDefinitions(ctx) {
+		add(t)
+	}
+	req["tools"] = tools
+}
+
+var mcpToolCache struct {
+	sync.Mutex
+	at    time.Time
+	tools []map[string]any
+}
+
+// mcpToolDefinitions converts MCP tools/list results into OpenAI-style tool definitions.
+func mcpToolDefinitions(ctx context.Context) []map[string]any {
+	mcpToolCache.Lock()
+	defer mcpToolCache.Unlock()
+	if time.Since(mcpToolCache.at) < modelCacheTTL {
+		return mcpToolCache.tools
+	}
+
+	var out []map[string]any
+	if GlobalRegistry != nil {
+		for server := range GlobalRegistry.Discover() {
+			c, err := GlobalRegistry.GetClient(server)
+			if err != nil {
+				continue
+			}
+			raw, err := c.ListTools(mcpToolTimeout)
+			if err != nil {
+				log.Printf("tools/list failed for %s: %v", server, err)
+				continue
+			}
+			var list struct {
+				Tools []struct {
+					Name        string         `json:"name"`
+					Description string         `json:"description"`
+					InputSchema map[string]any `json:"inputSchema"`
+				} `json:"tools"`
+			}
+			if err := json.Unmarshal(raw, &list); err != nil {
+				continue
+			}
+			for _, t := range list.Tools {
+				params := t.InputSchema
+				if params == nil {
+					params = map[string]any{"type": "object", "properties": map[string]any{}}
+				}
+				out = append(out, map[string]any{
+					"type": "function",
+					"function": map[string]any{
+						"name":        server + "." + t.Name,
+						"description": t.Description,
+						"parameters":  params,
+					},
+				})
+			}
+		}
+	}
+	mcpToolCache.at = time.Now()
+	mcpToolCache.tools = out
+	return out
+}
+
+var modelCache struct {
+	sync.Mutex
+	at     time.Time
+	models []ollamaModel
+}
+
+func cachedModels(ctx context.Context) ([]ollamaModel, error) {
+	modelCache.Lock()
+	defer modelCache.Unlock()
+	if time.Since(modelCache.at) < modelCacheTTL && modelCache.models != nil {
+		return modelCache.models, nil
+	}
+	models, err := fetchModels(ctx)
+	if err != nil {
+		return modelCache.models, err
+	}
+	modelCache.at = time.Now()
+	modelCache.models = models
+	return models, nil
+}
+
+func modelSupportsTools(ctx context.Context, name string) bool {
+	models, err := cachedModels(ctx)
+	if err != nil || models == nil {
+		return false
+	}
+	for _, m := range models {
+		if m.Name == name || strings.TrimSuffix(m.Name, ":latest") == name {
+			for _, c := range m.Capabilities {
+				if c == "tools" {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	return false
+}
+
+// ---------- request preparation ----------
+
+// prepareRequest reads and parses the body, resolves "recommended", and
+// injects options. It does NOT write the body back (see setBody).
+func prepareRequest(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
 	r.Body.Close()
 	if err != nil {
@@ -144,32 +501,23 @@ func rewriteRequest(w http.ResponseWriter, r *http.Request) bool {
 		} else {
 			http.Error(w, "Error reading request body", http.StatusBadRequest)
 		}
-		return false
+		return nil, false
 	}
 
 	var req map[string]any
 	if err := json.Unmarshal(body, &req); err != nil {
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
-		return false
+		return nil, false
 	}
 
-	// Inject the built-in MCP discover tool into the tools list if present
-	if tools, ok := req["tools"].([]any); ok {
-		tools = append(tools, discoverTool)
-		req["tools"] = tools
-	} else if r.Method == http.MethodPost {
-		// If no tools are present, but the model is capable of tool calling,
-		// we can optionally inject the discover tool here to ensure the LLM
-		// always has a way to find MCP servers.
-		req["tools"] = []any{discoverTool}
-	}
-
+	// Routing must happen BEFORE tool injection so requestHints sees the
+	// client's real tool usage.
 	if model, _ := req["model"].(string); model == "recommended" {
 		req["model"] = chooseModel(r.Context(), req, r.URL.Path)
 	}
 
-	// NOTE: Stock Ollama uses a top-level "think" field rather than this option.
-	// Keep this only if your Ollama build actually reads options.thinking_level.
+	// NOTE: Stock Ollama uses a top-level "think" field; keep this only if
+	// your Ollama build reads options.thinking_level.
 	options, ok := req["options"].(map[string]any)
 	if !ok {
 		options = make(map[string]any)
@@ -177,64 +525,61 @@ func rewriteRequest(w http.ResponseWriter, r *http.Request) bool {
 	}
 	options["thinking_level"] = 5
 
+	return req, true
+}
+
+func setBody(w http.ResponseWriter, r *http.Request, req map[string]any) bool {
 	newBody, err := json.Marshal(req)
 	if err != nil {
 		http.Error(w, "Error encoding request body", http.StatusInternalServerError)
 		return false
 	}
-
 	r.Body = io.NopCloser(bytes.NewReader(newBody))
 	r.ContentLength = int64(len(newBody))
 	r.Header.Set("Content-Length", strconv.Itoa(len(newBody)))
 	return true
 }
 
-// chooseModel always returns a usable model name, falling back on any failure.
+// ---------- routing (unchanged logic) ----------
+
 func chooseModel(ctx context.Context, req map[string]any, path string) string {
 	log.Printf("Model is 'recommended'. Determining best model via /v1/systemone...")
 
-	models, err := fetchModels(ctx)
-	if err != nil {
+	models, err := cachedModels(ctx)
+	if err != nil || models == nil {
 		log.Printf("Error fetching models: %v. Falling back to %s.", err, fallbackModel)
 		return fallbackModel
 	}
 
-	// Dynamically identify the router model: look for one with "decision" capability.
-	var currentRouter *ollamaModel
-	for i := range models {
-		m := &models[i]
-		for _, cap := range m.Capabilities {
-			if cap == "decision" {
-				currentRouter = m
-				break
+	isDecision := func(m ollamaModel) bool {
+		for _, c := range m.Capabilities {
+			if c == "decision" {
+				return true
 			}
 		}
-		if currentRouter != nil {
+		return false
+	}
+
+	var currentRouter *ollamaModel
+	for i := range models {
+		if isDecision(models[i]) {
+			currentRouter = &models[i]
 			break
 		}
 	}
-
 	if currentRouter == nil {
 		log.Printf("No model with 'decision' capability found. Falling back to %s.", fallbackModel)
 		return fallbackModel
 	}
 
-	// Exclude all decision models from the candidates to prevent routing to another router.
 	candidates := make(map[string]string)
 	for _, m := range models {
-		isDecisionModel := false
-		for _, cap := range m.Capabilities {
-			if cap == "decision" {
-				isDecisionModel = true
-				break
-			}
-		}
-		if !isDecisionModel {
+		if !isDecision(m) {
 			candidates[m.Name] = describeModel(m)
 		}
 	}
 	if len(candidates) == 0 {
-		log.Printf("No candidate models available (excluding decision models). Falling back to %s.", fallbackModel)
+		log.Printf("No candidate models available. Falling back to %s.", fallbackModel)
 		return fallbackModel
 	}
 
@@ -280,12 +625,7 @@ func fetchModels(ctx context.Context) ([]ollamaModel, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
 		return nil, fmt.Errorf("decoding /api/tags: %w", err)
 	}
-
-	names := make([]ollamaModel, 0, len(list.Models))
-	for _, m := range list.Models {
-		names = append(names, m)
-	}
-	return names, nil
+	return list.Models, nil
 }
 
 func askRouter(ctx context.Context, input string, candidates map[string]string, routerModel string) (string, error) {
@@ -341,9 +681,6 @@ func askRouter(ctx context.Context, input string, candidates map[string]string, 
 	return ans.Choice, nil
 }
 
-// describeModel renders /api/tags metadata into a short, router-facing blurb
-// covering cost, speed, size, and capabilities so the router can weigh
-// efficiency against capability for each candidate.
 func describeModel(m ollamaModel) string {
 	var b strings.Builder
 	if m.RemoteHost != "" {
@@ -377,7 +714,6 @@ func describeModel(m ollamaModel) string {
 	return b.String()
 }
 
-// humanContext shortens a context-window size: 262144 -> "262k", 1048576 -> "1M".
 func humanContext(n int) string {
 	switch {
 	case n >= 1_000_000 && n%1_000_000 == 0:
@@ -389,8 +725,6 @@ func humanContext(n int) string {
 	}
 }
 
-// requestHints flags request features the router must account for, since a
-// model without the matching capability cannot serve the request at all.
 func requestHints(req map[string]any) string {
 	var hints []string
 
@@ -412,16 +746,23 @@ func requestHints(req map[string]any) string {
 	if hasImages {
 		hints = append(hints, "The request contains image attachments, so the chosen model must support vision.")
 	}
-
 	if tools, ok := req["tools"].([]any); ok && len(tools) > 0 {
 		hints = append(hints, "The request includes tool definitions, so the chosen model must support tool calling.")
 	}
-
 	return strings.Join(hints, "\n")
 }
 
-// extractInput pulls the system prompt (if any) and the latest user text so
-// the router sees request context, without producing "<nil>".
+var (
+	stripTagRes = func() []*regexp.Regexp {
+		var res []*regexp.Regexp
+		for _, tag := range []string{"tools", "rules", "docs", "skills", "cwd", "acp", "available_skills"} {
+			res = append(res, regexp.MustCompile("(?is)<"+tag+`[^>]*>.*?</`+tag+`>`))
+		}
+		return res
+	}()
+	reAutomated = regexp.MustCompile(`(?is)\[.*?automated context.*?\]`)
+)
+
 func extractInput(req map[string]any, path string, router *ollamaModel) string {
 	var parts []string
 	if path == "/api/chat" || path == "/v1/chat/completions" {
@@ -434,19 +775,16 @@ func extractInput(req map[string]any, path string, router *ollamaModel) string {
 				}
 				role, _ := m["role"].(string)
 				content, _ := m["content"].(string)
-
-				// Only extract user content to avoid leaking tool calls,
-				// system prompts, or assistant history into the router's state.
 				if role == "user" && content != "" {
 					lastUser = content
 				}
 			}
 			if lastUser != "" {
-				parts = append(parts, "User: "+lastUser)
+				parts = append(parts, lastUser)
 			}
 		}
 	} else if prompt, _ := req["prompt"].(string); prompt != "" {
-		parts = append(parts, "User: "+prompt)
+		parts = append(parts, prompt)
 	}
 
 	res := strings.Join(parts, "\n\n")
@@ -454,52 +792,36 @@ func extractInput(req map[string]any, path string, router *ollamaModel) string {
 		return "Empty request"
 	}
 
-	// Strip harness markers: Remove everything between <tag...>...</tag>
-	// and specifically remove blocks like <tools>, <rules>, <docs>, <skills>, etc.
-	tagsToStrip := []string{"tools", "rules", "docs", "skills", "cwd", "acp", "available_skills"}
-	for _, tag := range tagsToStrip {
-		// Regex to match <tag ...>content</tag> case-insensitively and across lines.
-		re := regexp.MustCompile("(?is)<" + tag + `[^>]*>.*?</` + tag + `>`)
+	for _, re := range stripTagRes {
 		res = re.ReplaceAllString(res, "")
 	}
-
-	// Also strip the ACP tags and metadata
-	res = strings.ReplaceAll(res, "--- pi-extension-context:start ---", "")
-	res = strings.ReplaceAll(res, "--- pi-extension-context:end ---", "")
-	res = strings.ReplaceAll(res, "<file-context>", "")
-	res = strings.ReplaceAll(res, "</file-context>", "")
-	res = strings.ReplaceAll(res, "User: ", "")
-
-	// Strip automated context blocks (typically denoted by [ ... automated context ... ])
-	// and any trailing extension/tooling information.
-	reAutomated := regexp.MustCompile(`(?is)\[.*?automated context.*?\]`)
+	for _, s := range []string{
+		"--- pi-extension-context:start ---", "--- pi-extension-context:end ---",
+		"<file-context>", "</file-context>",
+		"📌 pi-lens active",
+		"Key tools (see each tool's own description for args):",
+	} {
+		res = strings.ReplaceAll(res, s, "")
+	}
 	res = reAutomated.ReplaceAllString(res, "")
-
-	// Remove common harness markers and tool lists that often follow automated context
-	res = strings.ReplaceAll(res, "📌 pi-lens active", "")
-	res = strings.ReplaceAll(res, "Key tools (see each tool's own description for args):", "")
 
 	res = strings.TrimSpace(res)
 	if res == "" {
 		return "Empty request"
 	}
 
-	// Truncate to avoid exceeding router's context limit.
 	maxTokens := 2048
 	if router != nil && router.Details.ContextLength > 0 {
 		maxTokens = router.Details.ContextLength
 	}
-
 	effectiveMaxTokens := maxTokens - 256
 	if effectiveMaxTokens < 1 {
 		effectiveMaxTokens = 1
 	}
-
 	maxChars := effectiveMaxTokens * 3
 
-	fmt.Println(res)
 	if len(res) > maxChars {
-		truncatedText := "... [truncated]"
+		const truncatedText = "... [truncated]"
 		return res[:maxChars-len(truncatedText)] + truncatedText
 	}
 	return res
