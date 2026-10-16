@@ -225,6 +225,15 @@
       c.querySelectorAll("pre code").forEach(function(block) {
         hljs.highlightElement(block);
       });
+    } else {
+      // STREAMING PATH:
+      // To maintain the "typing" effect while avoiding innerHTML warnings,
+      // we use a DocumentFragment via Range.
+      var range = document.createRange();
+      var frag = range.createContextualFragment(html);
+      
+      c.textContent = "";
+      c.appendChild(frag);
     }
     
     // Note: innerHTML is used here because we are rendering a controlled set of 
@@ -484,22 +493,26 @@
       var j = await r.json();
       modelSel.innerHTML = "";
       
+      // Always start with the "recommended" option
+      var rec = document.createElement("option");
+      rec.value = "recommended";
+      rec.textContent = "recommended";
+      rec.title = "Route automatically to the best model";
+      modelsMeta["recommended"] = rec.title;
+      modelSel.appendChild(rec);
+
       var modelList = j.models || [];
-      if (modelList.length === 0) {
-        modelSel.innerHTML = "<option value=\"recommended\">recommended</option>";
-      } else {
-        modelList.forEach(function (m) {
-          var name = typeof m === 'string' ? m : (m.name || "");
-          var desc = typeof m === 'string' ? "" : (m.description || m.details || "");
-          if (!name) return;
-          var o = document.createElement("option");
-          o.value = name;
-          o.textContent = name;
-          o.title = desc;
-          modelsMeta[name] = desc;
-          modelSel.appendChild(o);
-        });
-      }
+      modelList.forEach(function (m) {
+        var name = typeof m === 'string' ? m : (m.name || "");
+        var desc = typeof m === 'string' ? "" : (m.description || m.details || "");
+        if (!name) return;
+        var o = document.createElement("option");
+        o.value = name;
+        o.textContent = name;
+        o.title = desc;
+        modelsMeta[name] = desc;
+        modelSel.appendChild(o);
+      });
       
       var saved = localStorage.getItem(MODEL_KEY);
       if (saved && modelsMeta[saved] !== undefined) modelSel.value = saved;

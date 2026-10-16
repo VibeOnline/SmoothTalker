@@ -172,8 +172,12 @@ func handleChat(w http.ResponseWriter, r *http.Request, opts chatOpts) {
 
 	injectMCPTools(ctx, req, opts)
 
-	// Always talk to Ollama non-streaming so we can inspect tool calls;
-	// we convert back to the client's requested format at the end.
+	// To support MCP tool loops, we MUST use non-streaming
+	// requests to Ollama initially to see if the model wants to call tools.
+	// If the model returns a normal answer, we can then re-request as streaming
+	// for the final output if the client wants it.
+	//
+	// Current logic: Always force non-streaming to handle tool loop.
 	req["stream"] = false
 
 	for round := 0; round < maxToolRounds; round++ {
@@ -201,6 +205,13 @@ func handleChat(w http.ResponseWriter, r *http.Request, opts chatOpts) {
 		calls := toolCallsOf(msg)
 		if len(calls) == 0 || !allServerCalls(calls, opts) {
 			// Either a normal answer or the client's own tools: hand it back.
+			if wantStream {
+				// To get actual word-by-word streaming, we must re-request
+				// as a streaming response since the tool-check required non-streaming.
+				req["stream"] = true
+				streamUpstream(w, r, req, isOpenAI)
+				return
+			}
 			writeFinal(w, body, resp, isOpenAI, wantStream)
 			return
 		}
@@ -225,6 +236,45 @@ func handleChat(w http.ResponseWriter, r *http.Request, opts chatOpts) {
 	}
 
 	http.Error(w, "too many tool-call rounds", http.StatusBadGateway)
+}
+
+func streamUpstream(w http.ResponseWriter, orig *http.Request, req map[string]any, isOpenAI bool) {
+	payload, err := json.Marshal(req)
+	if err != nil {
+		http.Error(w, "Error encoding request: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	hr, err := http.NewRequestWithContext(orig.Context(), http.MethodPost, target+orig.URL.Path, bytes.NewReader(payload))
+	if err != nil {
+		http.Error(w, "Error creating request: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	hr.Header.Set("Content-Type", "application/json")
+	if auth := orig.Header.Get("Authorization"); auth != "" {
+		hr.Header.Set("Authorization", auth)
+	}
+
+	resp, err := upstream.Do(hr)
+	if err != nil {
+		http.Error(w, "Upstream connection error: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+		return
+	}
+
+	if isOpenAI {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+	} else {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+	}
+
+	_, _ = io.Copy(w, resp.Body)
 }
 
 func streamRequested(req map[string]any, isOpenAI bool) bool {

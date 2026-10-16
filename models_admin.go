@@ -28,6 +28,18 @@ func modelsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for _, m := range models {
+		// Filter out decision models from the public list
+		isDecision := false
+		for _, c := range m.Capabilities {
+			if c == "decision" {
+				isDecision = true
+				break
+			}
+		}
+		if isDecision {
+			continue
+		}
+
 		modelItems = append(modelItems, struct {
 			Name        string `json:"name"`
 			Description string `json:"description"`
