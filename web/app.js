@@ -6,11 +6,14 @@
   var sidebar = $("sidebar"), listEl = $("convo-list"), messagesEl = $("messages"),
       welcomeEl = $("welcome"), scrollEl = $("scroll"), inputEl = $("input"),
       sendBtn = $("send"), modelSel = $("model"), titleEl = $("chat-title"),
-      statusEl = $("status"), openSettingsBtn = $("open-settings"),
+      openSettingsBtn = $("open-settings"),
       settingsScreen = $("settings-screen"), closeSettingsBtn = $("close-settings"), mcpSaveBtn = $("mcp-save"),
       mcpSettingsListEl = $("settings-mcp-list"), mcpNameIn = $("mcp-name"),
       mcpCmdIn = $("mcp-cmd"), mcpArgsIn = $("mcp-args"), themeSel = $("theme-select"),
-      mcpModal = $("mcp-modal"), openMcpModalBtn = $("open-mcp-modal"), closeMcpModalBtn = $("close-mcp-modal");
+      mcpModal = $("mcp-modal"), openMcpModalBtn = $("open-mcp-modal"), closeMcpModalBtn = $("close-mcp-modal"),
+      modelModal = $("model-modal"), modelSettingsListEl = $("settings-model-list"), openModelModalBtn = $("open-model-modal"), closeModelModalBtn = $("close-model-modal"),
+      modelPullNameIn = $("model-pull-name"), modelPullSaveBtn = $("model-pull-save"),
+      confirmModal = $("confirm-modal"), confirmText = $("confirm-text"), confirmOkBtn = $("confirm-ok"), confirmCancelBtn = $("confirm-cancel");
 
   // ---------- State ----------
   var STORE_KEY = "chat.convos.v1";
@@ -439,9 +442,33 @@
   }
 
   // ---------- Models ----------
+  function confirmAction(text) {
+    return new Promise(function (resolve) {
+      confirmText.textContent = text;
+      confirmModal.style.display = "flex";
+      
+      var ok = function () {
+        confirmModal.style.display = "none";
+        confirmOkBtn.onclick = null;
+        confirmCancelBtn.onclick = null;
+        resolve(true);
+      };
+      var cancel = function () {
+        confirmModal.style.display = "none";
+        confirmOkBtn.onclick = null;
+        confirmCancelBtn.onclick = null;
+        resolve(false);
+      };
+      
+      confirmOkBtn.onclick = ok;
+      confirmCancelBtn.onclick = cancel;
+    });
+  }
+
   async function loadModels() {
     try {
       var r = await fetch("/web/models");
+      if (!r.ok) throw new Error("Failed to fetch models");
       var j = await r.json();
       modelSel.innerHTML = "";
       j.models.forEach(function (m) {
@@ -454,13 +481,133 @@
       });
       var saved = localStorage.getItem(MODEL_KEY);
       if (saved && modelsMeta[saved] !== undefined) modelSel.value = saved;
-      statusEl.textContent = (j.models.length - 1) + " models · fallback " + j.fallback;
-    } catch {
+    } catch (e) {
+      console.error("loadModels error:", e);
       modelSel.innerHTML = "<option value=\"recommended\">recommended</option>";
-      statusEl.textContent = "Could not load models";
     }
     modelSel.title = modelsMeta[modelSel.value] || "Model";
   }
+
+  async function loadModelBrowser() {
+    if (!modelSettingsListEl) return;
+    modelSettingsListEl.innerHTML = "";
+    try {
+      var r = await fetch("/ui/api/models");
+      var models = await r.json();
+      if (!models || !models.length) {
+        modelSettingsListEl.innerHTML = "<div style=\"opacity:.7;font-size:.9rem\">No local models found.</div>";
+        return;
+      }
+      models.forEach(function(m) {
+        var row = document.createElement("div");
+        row.style.cssText = "display:flex;align-items:center;justify-content:space-between;padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:6px;";
+        
+        var nameEl = document.createElement("span");
+        nameEl.style.fontWeight = "500";
+        nameEl.textContent = typeof m === 'string' ? m : (m.name || JSON.stringify(m));
+        
+        var delBtn = document.createElement("button");
+        delBtn.innerHTML = '<i class="fa-solid fa-trash-can"></i>';
+        delBtn.title = "Remove Model";
+        delBtn.style.cssText = "background:transparent;color:var(--text);border:1px solid var(--border);border-radius:4px;cursor:pointer;padding:4px 8px;font-size:0.8rem;opacity:0.7;";
+        delBtn.onclick = async function() {
+          var modelName = typeof m === 'string' ? m : (m.name || "");
+          if (!modelName) return;
+          if (!(await confirmAction("Remove model \"" + modelName + "\"?"))) return;
+          try {
+            var dr = await fetch("/ui/api/models/" + encodeURIComponent(modelName), { method: "DELETE" });
+            if (!dr.ok) throw new Error(await dr.text());
+            loadModelBrowser();
+          } catch (e) { alert("Error removing model: " + e.message); }
+        };
+        
+        row.appendChild(nameEl);
+        row.appendChild(delBtn);
+        modelSettingsListEl.appendChild(row);
+      });
+    } catch {
+      console.error("Failed to load model browser");
+      modelSettingsListEl.innerHTML = "<div style=\"color:#c0392b;font-size:.9rem\">Error loading models.</div>";
+    }
+  }
+
+  openModelModalBtn.onclick = function() {
+    modelPullNameIn.value = "";
+    modelModal.style.display = "flex";
+  };
+  closeModelModalBtn.onclick = function() {
+    modelModal.style.display = "none";
+  };
+  modelPullSaveBtn.onclick = async function() {
+    var name = modelPullNameIn.value.trim();
+    if (!name) { alert("Model name is required"); return; }
+
+    const progressPanel = document.getElementById("model-pull-progress");
+    const percentText = document.getElementById("model-pull-percent");
+    const progressBar = document.getElementById("model-pull-bar");
+
+    try {
+      progressPanel.style.display = "flex";
+      modelPullSaveBtn.disabled = true;
+      modelPullSaveBtn.textContent = "Pulling...";
+
+      const response = await fetch("/ui/api/models/pull", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: name })
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(errText || "Server error");
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        
+        // Keep the last partial line in the buffer
+        buffer = lines.pop() || "";
+        
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          try {
+            const data = JSON.parse(line);
+            if (data.completed) {
+              percentText.textContent = "100%";
+              progressBar.style.width = "100%";
+            } else if (data.total != null && data.completed != null) {
+              const pct = Math.round((data.completed / data.total) * 100);
+              percentText.textContent = pct + "%";
+              progressBar.style.width = pct + "%";
+            }
+          } catch {
+            // Ignore non-JSON lines
+          }
+        }
+      }
+
+      modelModal.style.display = "none";
+      loadModelBrowser();
+      loadModels();
+    } catch (e) { 
+      alert("Error pulling model: " + (e.message || "Failed to fetch")); 
+    } finally {
+      progressPanel.style.display = "none";
+      modelPullSaveBtn.disabled = false;
+      modelPullSaveBtn.textContent = "Pull Model";
+      progressBar.style.width = "0%";
+      percentText.textContent = "0%";
+    }
+  };
+
 
   // ---------- Events ----------
   inputEl.addEventListener("input", autosize);
@@ -531,6 +678,7 @@
     settingsScreen.style.display = "block";
     loadMcpServers();
     loadLuaTools();
+    loadModelBrowser();
   };
   closeSettingsBtn.onclick = function () {
     settingsScreen.style.display = "none";
@@ -640,7 +788,9 @@
         mItem.appendChild(btnGroup);
         mcpSettingsListEl.appendChild(mItem);
       });
-    } catch (e) { console.error("Failed to load MCP servers", e); }
+    } catch {
+      console.error("Failed to load MCP servers");
+    }
   }
 
   // ---------- Lua Tools Integration ----------
@@ -721,11 +871,11 @@
         row.onclick = function() { openToolEditor(t.name); };
         toolEls.list.appendChild(row);
       });
-    } catch (e) {
+    } catch {
       var errEl = document.createElement("div");
       errEl.style.opacity = ".7";
       errEl.style.fontSize = ".9rem";
-      errEl.textContent = "Failed to load tools: " + (e.message || "Unknown error");
+      errEl.textContent = "Failed to load tools: Unknown error";
       toolEls.list.appendChild(errEl);
     }
   }
@@ -767,7 +917,7 @@
   async function saveTool() {
     var t = await validateTool();
     if (!t) return;
-    if (editingTool && editingTool !== t.name && !confirm("The tool name changed from \"" + editingTool + "\" to \"" + t.name + "\". Save it as a new tool and delete the old one?")) {
+    if (editingTool && editingTool !== t.name && !(await confirmAction("The tool name changed from \"" + editingTool + "\" to \"" + t.name + "\". Save it as a new tool and delete the old one?"))) {
       return;
     }
     try {
@@ -790,7 +940,7 @@
   }
 
   async function deleteTool() {
-    if (!editingTool || !confirm("Delete tool \"" + editingTool + "\"?")) return;
+    if (!editingTool || !(await confirmAction("Delete tool \"" + editingTool + "\"?"))) return;
     try {
       await toolApi("/" + encodeURIComponent(editingTool), { method: "DELETE" });
       toolEls.modal.style.display = "none";
@@ -804,7 +954,7 @@
     var args;
     try {
       args = JSON.parse(toolEls.testArgs.value || "{}");
-    } catch (e) {
+    } catch {
       toolEls.testOut.textContent = "Arguments must be valid JSON.";
       return;
     }
@@ -815,7 +965,7 @@
         body: JSON.stringify({ args: args }),
       });
       var out = r.result;
-      try { out = JSON.stringify(JSON.parse(out), null, 2); } catch (_) {}
+      try { out = JSON.stringify(JSON.parse(out), null, 2); } catch { }
       toolEls.testOut.textContent = "(" + r.durationMs + " ms)\n" + out;
     } catch (e) {
       toolEls.testOut.textContent = e.message;
@@ -857,6 +1007,8 @@
     if (convos.length) { current = convos[0]; renderList(); renderMessages(); }
     else newConvo();
     autosize();
+  }).catch(function() {
+    // Silently fail or handle
   });
   loadMcpServers();
 })();

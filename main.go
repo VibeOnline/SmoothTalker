@@ -106,6 +106,7 @@ func main() {
 
 	uiMux := http.NewServeMux()
 	registerToolAdmin(uiMux)
+	registerModelAdmin(uiMux)
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Frontend-only chat endpoint: Lua tools enabled.
@@ -115,7 +116,7 @@ func main() {
 			return
 		}
 
-		if strings.HasPrefix(r.URL.Path, "/ui/api/tools") {
+		if strings.HasPrefix(r.URL.Path, "/ui/api/tools") || strings.HasPrefix(r.URL.Path, "/ui/api/models") {
 			uiMux.ServeHTTP(w, r)
 			return
 		}
