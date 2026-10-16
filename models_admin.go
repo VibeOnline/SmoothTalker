@@ -21,7 +21,23 @@ func modelsList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "failed to fetch models: "+err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, models)
+
+	var modelItems []struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+	}
+
+	for _, m := range models {
+		modelItems = append(modelItems, struct {
+			Name        string `json:"name"`
+			Description string `json:"description"`
+		}{
+			Name:        m.Name,
+			Description: describeModelInternal(m),
+		})
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"models": modelItems})
 }
 
 func modelsPull(w http.ResponseWriter, r *http.Request) {
@@ -64,7 +80,7 @@ func modelsPull(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(resp.StatusCode)
-	
+
 	flusher, ok := w.(http.Flusher)
 	buf := make([]byte, 1024)
 	for {
@@ -92,12 +108,12 @@ func modelsDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Some Ollama versions use /api/delete instead of /api/tags/{name} 
+	// Some Ollama versions use /api/delete instead of /api/tags/{name}
 	// or require the name in a JSON body for DELETE.
 	// However, the most common current API for deleting a specific tag is DELETE /api/tags/{name}.
-	// If we are getting 404s consistently, let's try the alternate DELETE /api/delete approach 
+	// If we are getting 404s consistently, let's try the alternate DELETE /api/delete approach
 	// with a JSON body if the tag-based one fails.
-	
+
 	req, err := http.NewRequest(http.MethodDelete, target+"/api/tags/"+name, nil)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -115,7 +131,7 @@ func modelsDelete(w http.ResponseWriter, r *http.Request) {
 		// Try the alternative: DELETE /api/delete with {"name": "..."}
 		payload := map[string]string{"name": name}
 		pBody, _ := json.Marshal(payload)
-		
+
 		reqAlt, errAlt := http.NewRequest(http.MethodDelete, target+"/api/delete", bytes.NewReader(pBody))
 		if errAlt == nil {
 			reqAlt.Header.Set("Content-Type", "application/json")

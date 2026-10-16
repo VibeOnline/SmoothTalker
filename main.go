@@ -717,7 +717,15 @@ func askRouter(ctx context.Context, input string, candidates map[string]string, 
 	return ans.Choice, nil
 }
 
+func (m ollamaModel) String() string {
+	return describeModelInternal(m)
+}
+
 func describeModel(m ollamaModel) string {
+	return m.String()
+}
+
+func describeModelInternal(m ollamaModel) string {
 	var b strings.Builder
 	if m.RemoteHost != "" {
 		host := m.RemoteHost
