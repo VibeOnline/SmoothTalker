@@ -6,7 +6,7 @@
   var sidebar = $("sidebar"), listEl = $("convo-list"), messagesEl = $("messages"),
       welcomeEl = $("welcome"), scrollEl = $("scroll"), inputEl = $("input"),
       sendBtn = $("send"), modelSel = $("model"), titleEl = $("chat-title"),
-      statusEl = $("status"), mcpListEl = $("mcp-list"), openSettingsBtn = $("open-settings"),
+      statusEl = $("status"), openSettingsBtn = $("open-settings"),
       settingsScreen = $("settings-screen"), closeSettingsBtn = $("close-settings"), mcpSaveBtn = $("mcp-save"),
       mcpSettingsListEl = $("settings-mcp-list"), mcpNameIn = $("mcp-name"),
       mcpCmdIn = $("mcp-cmd"), mcpArgsIn = $("mcp-args"), themeSel = $("theme-select"),
@@ -486,6 +486,18 @@
     }
     localStorage.setItem("chat.theme.v1", theme);
     
+    // Update PWA window decoration color to match background
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) {
+      var color = "#24273a"; // Default dark --bg
+      if (theme === "light") {
+        color = "#eff1f5"; // light --bg
+      } else if (theme === "system") {
+        color = window.matchMedia('(prefers-color-scheme: dark)').matches ? "#24273a" : "#eff1f5";
+      }
+      meta.setAttribute("content", color);
+    }
+
     // Sync Highlight.js theme
     var lightLink = document.getElementById("hljs-light");
     var darkLink = document.getElementById("hljs-dark");
@@ -493,11 +505,6 @@
       var isDark = (theme === "dark") || (theme === "system" && window.matchMedia('(prefers-color-scheme: dark)').matches);
       lightLink.disabled = isDark;
       darkLink.disabled = !isDark;
-    }
-
-    // Update PWA window decoration color
-    if (typeof updateThemeColor === "function") {
-      updateThemeColor();
     }
   }
 
@@ -553,23 +560,10 @@
       var r = await fetch("/web/mcp");
       var servers = await r.json();
       
-      mcpListEl.innerHTML = "";
       mcpSettingsListEl.innerHTML = "";
       
       Object.keys(servers).forEach(function (name) {
         var s = servers[name];
-        
-        // Sidebar list
-        var sItem = document.createElement("div");
-        sItem.style.padding = "4px 8px";
-        sItem.style.borderRadius = "6px";
-        sItem.style.fontSize = "0.8rem";
-        sItem.style.opacity = "0.8";
-        sItem.style.cursor = "default";
-        sItem.onmouseover = function() { this.style.background = "var(--surface)"; this.style.opacity = "1"; };
-        sItem.onmouseout = function() { this.style.background = "transparent"; this.style.opacity = "0.8"; };
-        sItem.textContent = "✳ " + name;
-        mcpListEl.appendChild(sItem);
         
         // Settings list
         var mItem = document.createElement("div");
