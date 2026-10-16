@@ -1,55 +1,72 @@
 :root {
-  --bg: #faf9f5;
-  --sidebar: #f0eee6;
-  --surface: #ffffff;
-  --text: #1f1e1d;
-  --muted: #73726c;
-  --border: #e5e2d9;
-  --accent: #c96442;
-  --accent-hover: #b5573a;
-  --user-bubble: #f0eee6;
-  --code-bg: #f5f4ee;
-  --shadow: 0 2px 12px rgba(31, 30, 29, 0.07);
+  --bg: #24273a;
+  --sidebar: #1e2030;
+  --surface: #363a4f;
+  --text: #cad3f5;
+  --muted: #8087a2;
+  --border: #494d64;
+  --accent: #c6a0f6;
+  --accent-hover: #b58cf0;
+  --user-bubble: #2f334d;
+  --code-bg: #1e2030;
+  --shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
 }
 @media (prefers-color-scheme: dark) {
   :root:not(.light-theme) {
-    --bg: #262624;
-    --sidebar: #1f1e1d;
-    --surface: #30302e;
-    --text: #ece9df;
-    --muted: #9b9a93;
-    --border: #3d3c39;
-    --user-bubble: #3a3936;
-    --code-bg: #1f1e1d;
-    --shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
+    --bg: #24273a;
+    --sidebar: #1e2030;
+    --surface: #363a4f;
+    --text: #cad3f5;
+    --muted: #8087a2;
+    --border: #494d64;
+    --user-bubble: #2f334d;
+    --code-bg: #1e2030;
+    --shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
   }
 }
 .dark-theme {
-  --bg: #262624 !important;
-  --sidebar: #1f1e1d !important;
-  --surface: #30302e !important;
-  --text: #ece9df !important;
-  --muted: #9b9a93 !important;
-  --border: #3d3c39 !important;
-  --user-bubble: #3a3936 !important;
-  --code-bg: #1f1e1d !important;
-  --shadow: 0 2px 12px rgba(0, 0, 0, 0.3) !important;
+  --bg: #24273a !important;
+  --sidebar: #1e2030 !important;
+  --surface: #363a4f !important;
+  --text: #cad3f5 !important;
+  --muted: #8087a2 !important;
+  --border: #494d64 !important;
+  --user-bubble: #2f334d !important;
+  --code-bg: #1e2030 !important;
+  --shadow: 0 2px 12px rgba(0, 0, 0, 0.4) !important;
 }
 .light-theme {
-  --bg: #faf9f5 !important;
-  --sidebar: #f0eee6 !important;
+  --bg: #eff1f5 !important;
+  --sidebar: #e6e9ef !important;
   --surface: #ffffff !important;
-  --text: #1f1e1d !important;
-  --muted: #73726c !important;
-  --border: #e5e2d9 !important;
-  --user-bubble: #f0eee6 !important;
-  --code-bg: #f5f4ee !important;
-  --shadow: 0 2px 12px rgba(31, 30, 29, 0.07) !important;
+  --text: #4c4f69 !important;
+  --muted: #7f849c !important;
+  --border: #bcc0cc !important;
+  --user-bubble: #e6e9ef !important;
+  --code-bg: #e6e9ef !important;
+  --shadow: 0 2px 12px rgba(0, 0, 0, 0.1) !important;
 }
 /* Theme color for dark mode PWA is handled via manifest or meta, 
    but for the window decoration to match the sidebar in dark mode, 
    we'd need a dynamic manifest or JS update. 
    For now, I'll ensure the light mode decoration matches the sidebar variable. */
+/* Global Scrollbar Style */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 10px;
+  border: 2px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+}
+
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body {
@@ -60,6 +77,7 @@ body {
   line-height: 1.6;
   display: flex;
   overflow: hidden;
+  padding: 0;
 }
 .serif { font-family: ui-serif, "Iowan Old Style", Georgia, "Times New Roman", serif; }
 
@@ -67,12 +85,14 @@ body {
 #sidebar {
   width: 272px;
   background: var(--sidebar);
-  border-right: 1px solid var(--border);
+  border: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   padding: 14px 10px;
   flex-shrink: 0;
   transition: margin-left .2s ease;
+  border-radius: 16px;
+  margin: 8px;
 }
 #sidebar.hidden { margin-left: -272px; }
 .brand {
@@ -89,7 +109,7 @@ body {
   font: inherit; font-weight: 500; cursor: pointer;
   transition: background .15s;
 }
-#new-chat:hover { background: rgba(201, 100, 66, 0.1); }
+#new-chat:hover { background: rgba(198, 160, 246, 0.1); }
 .section-label { font-size: 12px; color: var(--muted); padding: 6px 12px; letter-spacing: .02em; }
 #convo-list { flex: 1; overflow-y: auto; }
 .convo {

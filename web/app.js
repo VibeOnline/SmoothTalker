@@ -208,6 +208,11 @@
       html += "<button data-act=\"copy\">Copy</button><button data-act=\"retry\">Retry</button></div>";
     }
     c.innerHTML = html;
+    if (!streaming) {
+      c.querySelectorAll("pre code").forEach(function(block) {
+        hljs.highlightElement(block);
+      });
+    }
 
     if (!streaming) {
       c.querySelector("[data-act=\"copy\"]").onclick = function (e) {
@@ -480,6 +485,15 @@
     }
     localStorage.setItem("chat.theme.v1", theme);
     
+    // Sync Highlight.js theme
+    var lightLink = document.getElementById("hljs-light");
+    var darkLink = document.getElementById("hljs-dark");
+    if (lightLink && darkLink) {
+      var isDark = (theme === "dark") || (theme === "system" && window.matchMedia('(prefers-color-scheme: dark)').matches);
+      lightLink.disabled = isDark;
+      darkLink.disabled = !isDark;
+    }
+
     // Update PWA window decoration color
     if (typeof updateThemeColor === "function") {
       updateThemeColor();
