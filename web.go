@@ -37,7 +37,7 @@ func handleWeb(w http.ResponseWriter, r *http.Request) bool {
 	case "/web/models":
 		serveWebModels(w, r.Context())
 		return true
-	case "/", "/index.html", "/style.css", "/app.js":
+	case "/", "/index.html", "/style.css", "/app.js", "/manifest.json", "/icon-192.png", "/icon-512.png", "/theme-sync.js":
 		w.Header().Set("Cache-Control", "no-store")
 		if r.URL.Path == "/index.html" {
 			r.URL.Path = "/" // FileServer redirects /index.html -> ./

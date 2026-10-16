@@ -24,6 +24,10 @@
     --shadow: 0 2px 12px rgba(0, 0, 0, 0.3);
   }
 }
+/* Theme color for dark mode PWA is handled via manifest or meta, 
+   but for the window decoration to match the sidebar in dark mode, 
+   we'd need a dynamic manifest or JS update. 
+   For now, I'll ensure the light mode decoration matches the sidebar variable. */
 * { box-sizing: border-box; }
 html, body { height: 100%; margin: 0; }
 body {
@@ -89,6 +93,7 @@ body {
 #toggle-sidebar {
   background: none; border: none; color: var(--muted); cursor: pointer;
   font-size: 20px; padding: 4px 8px; border-radius: 6px;
+  position: relative; z-index: 20;
 }
 #toggle-sidebar:hover { background: rgba(127, 127, 127, 0.15); }
 #chat-title { color: var(--muted); font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -191,4 +196,5 @@ details.think .tbody { white-space: pre-wrap; margin-top: 6px; font-size: 13.5px
 @media (max-width: 760px) {
   #sidebar { position: fixed; z-index: 10; height: 100%; }
   #sidebar.hidden { margin-left: -272px; }
+  .brand { padding-top: 52px; }
 }
