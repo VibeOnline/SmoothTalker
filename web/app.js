@@ -506,6 +506,17 @@
         var name = typeof m === 'string' ? m : (m.name || "");
         var desc = typeof m === 'string' ? "" : (m.description || m.details || "");
         if (!name) return;
+
+        // Filter out decision models from the chat dropdown
+        if (typeof m !== 'string' && m.capabilities) {
+          if (m.capabilities.indexOf('decision') !== -1) return;
+        }
+        if (typeof m === 'string') {
+          // If it's just a string, we can't know capabilities here, 
+          // but usually modelsList returns objects for detailed info.
+          // If we want to be safe, we only filter objects.
+        }
+
         var o = document.createElement("option");
         o.value = name;
         o.textContent = name;

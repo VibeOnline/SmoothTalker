@@ -23,29 +23,20 @@ func modelsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var modelItems []struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
+		Name         string   `json:"name"`
+		Description  string   `json:"description"`
+		Capabilities []string `json:"capabilities"`
 	}
 
 	for _, m := range models {
-		// Filter out decision models from the public list
-		isDecision := false
-		for _, c := range m.Capabilities {
-			if c == "decision" {
-				isDecision = true
-				break
-			}
-		}
-		if isDecision {
-			continue
-		}
-
 		modelItems = append(modelItems, struct {
-			Name        string `json:"name"`
-			Description string `json:"description"`
+			Name         string   `json:"name"`
+			Description  string   `json:"description"`
+			Capabilities []string `json:"capabilities"`
 		}{
-			Name:        m.Name,
-			Description: describeModelInternal(m),
+			Name:         m.Name,
+			Description:  describeModelInternal(m),
+			Capabilities: m.Capabilities,
 		})
 	}
 

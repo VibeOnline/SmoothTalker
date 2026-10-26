@@ -131,23 +131,36 @@ func main() {
 			return
 		}
 
-		if r.Method == http.MethodPost {
-			switch r.URL.Path {
-			case "/api/chat", "/v1/chat/completions":
-				handleChat(w, r, chatOpts{}) // no Lua tools
+	if r.Method == http.MethodPost {
+		switch r.URL.Path {
+		case "/api/chat", "/v1/chat/completions":
+			handleChat(w, r, chatOpts{}) // no Lua tools
+			return
+		case "/api/generate":
+			// For /api/generate, if streaming is requested, proxy directly to target.
+			// This bypasses MCP loop because /api/generate is for raw completions.
+			req, ok := prepareRequest(w, r)
+			if !ok {
 				return
-			case "/api/generate":
-				req, ok := prepareRequest(w, r)
-				if !ok {
-					return
-				}
+			}
+			
+			// Check if streaming is requested in the body
+			s, _ := req["stream"].(bool)
+			if s {
 				if !setBody(w, r, req) {
 					return
 				}
 				proxy.ServeHTTP(w, r)
 				return
 			}
+
+			if !setBody(w, r, req) {
+				return
+			}
+			proxy.ServeHTTP(w, r)
+			return
 		}
+	}
 
 		log.Printf("Proxying request: %s %s -> %s", r.Method, r.URL.Path, target)
 		proxy.ServeHTTP(w, r)
@@ -172,13 +185,20 @@ func handleChat(w http.ResponseWriter, r *http.Request, opts chatOpts) {
 
 	injectMCPTools(ctx, req, opts)
 
-	// To support MCP tool loops, we MUST use non-streaming
-	// requests to Ollama initially to see if the model wants to call tools.
-	// If the model returns a normal answer, we can then re-request as streaming
-	// for the final output if the client wants it.
+	// If the request is for streaming and NOT tool-calling, we can proxy it directly
+	// to Ollama to avoid the double-call penalty.
+	// However, we don't know if it's tool-calling yet.
+	// To avoid double-calls for non-tool requests, we can't easily "peek".
+	// BUT, if the user explicitly wants streaming, we can try to stream and
+	// handle tool calls in the stream.
 	//
-	// Current logic: Always force non-streaming to handle tool loop.
+	// For now, to maintain the MCP loop reliability, we use the double-call:
+	// 1. Non-stream call to check for tool usage.
+	// 2. If no tool usage and wantStream is true, a streaming call.
 	req["stream"] = false
+	
+	// ... (rest of function)
+
 
 	for round := 0; round < maxToolRounds; round++ {
 		status, ctype, body, err := callUpstream(ctx, r, req)
@@ -217,6 +237,12 @@ func handleChat(w http.ResponseWriter, r *http.Request, opts chatOpts) {
 		}
 
 		// Execute MCP tool calls and feed results back to the model.
+		// To satisfy the requirement that tool/MCP calls should also be streamed,
+		// we emit the tool call as a streaming chunk to the client before executing it.
+		if wantStream {
+			emitToolCallStream(w, body, resp, isOpenAI)
+		}
+
 		msgs, _ := req["messages"].([]any)
 		msgs = append(msgs, msg)
 		for _, call := range calls {
@@ -236,6 +262,50 @@ func handleChat(w http.ResponseWriter, r *http.Request, opts chatOpts) {
 	}
 
 	http.Error(w, "too many tool-call rounds", http.StatusBadGateway)
+}
+
+func emitToolCallStream(w http.ResponseWriter, body []byte, resp map[string]any, isOpenAI bool) {
+	if !isOpenAI {
+		// For Ollama, we just emit the non-stream JSON as an NDJSON chunk.
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("X-Accel-Buffering", "no")
+		_, _ = w.Write(append(body, '\n'))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		return
+	}
+
+	// For OpenAI, convert the tool call response into a stream chunk.
+	msg := assistantMessage(resp, true)
+	delta := map[string]any{"role": "assistant"}
+	if msg != nil {
+		if tc, ok := msg["tool_calls"].([]any); ok && len(tc) > 0 {
+			for i, t := range tc {
+				if tm, ok := t.(map[string]any); ok {
+					tm["index"] = i
+				}
+			}
+			delta["tool_calls"] = tc
+		}
+	}
+
+	chunk := map[string]any{
+		"id":      resp["id"],
+		"object":  "chat.completion.chunk",
+		"created": resp["created"],
+		"model":   resp["model"],
+		"choices": []any{map[string]any{"index": 0, "delta": delta}},
+	}
+	data, _ := json.Marshal(chunk)
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	fmt.Fprintf(w, "data: %s\n\n", data)
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 func streamUpstream(w http.ResponseWriter, orig *http.Request, req map[string]any, isOpenAI bool) {
@@ -272,6 +342,12 @@ func streamUpstream(w http.ResponseWriter, orig *http.Request, req map[string]an
 		w.Header().Set("Cache-Control", "no-cache")
 	} else {
 		w.Header().Set("Content-Type", "application/x-ndjson")
+	}
+	w.Header().Set("X-Accel-Buffering", "no") // Disable buffering for Nginx/etc
+
+	// Force immediate flush by using a Flusher if available
+	if flusher, ok := w.(http.Flusher); ok {
+		flusher.Flush()
 	}
 
 	_, _ = io.Copy(w, resp.Body)
@@ -463,16 +539,10 @@ func injectMCPTools(ctx context.Context, req map[string]any, opts chatOpts) {
 	for _, t := range mcpToolDefinitions(ctx) {
 		add(t)
 	}
-	req["tools"] = tools
-
-	add(discoverTool)
 	if opts.luaTools {
 		for _, t := range LuaTools.Definitions() {
 			add(t)
 		}
-	}
-	for _, t := range mcpToolDefinitions(ctx) {
-		add(t)
 	}
 	req["tools"] = tools
 }
